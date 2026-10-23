@@ -56,6 +56,16 @@ jobs:
           }
           console.log('Exact qualified compiler metadata representation authenticated.');
           NODE
+      - name: Verified Compose configuration loader
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose_bin="$RUNNER_TEMP/docker-compose-v5.6.0"
+          curl --fail --show-error --location https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-x86_64 --output "$compose_bin"
+          printf '%s  %s\n' 40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a "$compose_bin" | sha256sum --check --strict
+          chmod 0755 "$compose_bin"
+          test "$("$compose_bin" version --short)" = '5.6.0'
+          printf 'ZEVYRN_COMPOSE_BIN=%s\n' "$compose_bin" >> "$GITHUB_ENV"
       - name: Locked dependencies and tools
         run: |
           npm ci --no-audit --no-fund
