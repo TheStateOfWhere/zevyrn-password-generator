@@ -18,6 +18,103 @@ concurrency:
   group: zevyrn-qualified-ghcr-1.2.1
   cancel-in-progress: false
 env:
+  DRAFT_DIAGNOSTIC_JS: |
+    'use strict';
+    // Diagnostic only: fixed GET endpoints, no asset download or release/registry writes.
+    const fs = require('node:fs');
+    const API = 'https://api.github.com/repos/TheStateOfWhere/zevyrn-password-generator';
+    const EXPECTED = { id: 422212826, tag: 'v1.2.1', target: '8835de6664daefc3193fa1d989dd31659048b6f8' };
+    const report = { schema: 1, diagnosticOnly: true, executionSHA: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') ? process.env.GITHUB_SHA : null,
+      expected: EXPECTED, pages: [], paginationComplete: false, totalReleases: null,
+      matchingCount: null, matching: [], direct: null, failures: [] };
+    function failure(code) { return Object.assign(new Error(code), { code }); }
+    function identity(r) {
+      return { id: Number.isSafeInteger(r?.id) ? r.id : null,
+        tagMatches: r?.tag_name === EXPECTED.tag, draft: typeof r?.draft === 'boolean' ? r.draft : null,
+        targetMatches: r?.target_commitish === EXPECTED.target,
+        idMatches: r?.id === EXPECTED.id,
+        repositoryMatches: r?.url === API + '/releases/' + EXPECTED.id && r?.assets_url === API + '/releases/' + EXPECTED.id + '/assets' };
+    }
+    function valid(i) { return i.idMatches && i.tagMatches && i.draft === true && i.targetMatches && i.repositoryMatches; }
+    async function get(url, observation) {
+      const u = new URL(url);
+      const list = u.origin + u.pathname === API + '/releases' && u.searchParams.get('per_page') === '100' &&
+        /^[1-9][0-9]?$/.test(u.searchParams.get('page') || '') && [...u.searchParams].length === 2;
+      if (!list && url !== API + '/releases/' + EXPECTED.id) throw failure('REQUEST_NOT_ALLOWED');
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const response = await fetch(url, { method: 'GET', redirect: 'error', signal: controller.signal,
+          headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+            Authorization: 'Bearer ' + process.env.GH_TOKEN } });
+        observation.status = response.status;
+        const chunks = []; let bytes = 0;
+        for await (const chunk of response.body || []) {
+          bytes += chunk.length;
+          if (bytes > 1048576) { controller.abort(); throw failure('RESPONSE_TOO_LARGE'); }
+          chunks.push(chunk);
+        }
+        return { status: response.status, body: Buffer.concat(chunks).toString('utf8'), link: response.headers.get('link') || '' };
+      } catch (e) {
+        throw failure(e.code === 'RESPONSE_TOO_LARGE' ? e.code : controller.signal.aborted ? 'REQUEST_TIMEOUT' : 'NETWORK_OR_REDIRECT_FAILURE');
+      } finally { clearTimeout(timer); }
+    }
+    function apiError(status) { return status === 401 || status === 403 ? 'API_AUTHENTICATION_OR_AUTHORIZATION_FAILURE' : 'API_HTTP_FAILURE'; }
+    async function main() {
+      try {
+        fs.mkdirSync('publication-evidence', { recursive: true });
+        if (process.env.GITHUB_REPOSITORY !== 'TheStateOfWhere/zevyrn-password-generator' ||
+            process.env.GITHUB_REF !== 'refs/heads/main' || process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+            process.env.MODE !== 'inspect' || process.env.ASSET !== '670100979' ||
+            !/^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') || !process.env.GH_TOKEN) throw failure('INVALID_DIAGNOSTIC_CONTEXT');
+        const releases = [];
+        try {
+          for (let page = 1; page <= 10; page++) {
+            const observation = { page, status: null, returned: null, hasNext: null }; report.pages.push(observation);
+            const r = await get(API + '/releases?per_page=100&page=' + page, observation);
+            if (r.status !== 200) throw failure(apiError(r.status));
+            let rows; try { rows = JSON.parse(r.body); } catch { throw failure('MALFORMED_LIST_RESPONSE'); }
+            if (!Array.isArray(rows) || rows.length > 100 || !rows.every(x => x && typeof x === 'object' && typeof x.tag_name === 'string')) throw failure('MALFORMED_LIST_RESPONSE');
+            observation.returned = rows.length; releases.push(...rows);
+            const next = /<([^>]+)>;\s*rel="next"/.exec(r.link); observation.hasNext = !!next;
+            if (/rel="next"/.test(r.link) && !next) throw failure('MALFORMED_PAGINATION');
+            if (!next) { report.paginationComplete = true; break; }
+            let n; try { n = new URL(next[1]); } catch { throw failure('MALFORMED_PAGINATION'); }
+            if (n.origin + n.pathname !== API + '/releases' || n.searchParams.get('per_page') !== '100' ||
+                n.searchParams.get('page') !== String(page + 1) || [...n.searchParams].length !== 2) throw failure('UNEXPECTED_PAGINATION');
+            if (page === 10) throw failure('PAGINATION_LIMIT');
+          }
+          report.totalReleases = releases.length;
+          const matches = releases.filter(r => r.tag_name === EXPECTED.tag);
+          report.matchingCount = matches.length; report.matching = matches.map(identity);
+          if (!matches.length) throw failure('ZERO_MATCHES');
+          if (matches.length !== 1) throw failure('MULTIPLE_MATCHES');
+          if (!valid(report.matching[0])) throw failure('LIST_RELEASE_IDENTITY_MISMATCH');
+        } catch (e) { report.failures.push('LIST_' + (e.code || 'INTERNAL_FAILURE')); }
+        report.returnedReleases = releases.length;
+        const observed = releases.filter(r => r.tag_name === EXPECTED.tag);
+        report.observedMatchingCount = observed.length;
+        if (report.matchingCount === null) report.matching = observed.map(identity);
+        // Independent fixed-ID observation, never a fallback that overrides a failed listing.
+        try {
+          report.direct = { status: null, identity: null };
+          const r = await get(API + '/releases/' + EXPECTED.id, report.direct);
+          if (r.status !== 200) throw failure(apiError(r.status));
+          let row; try { row = JSON.parse(r.body); } catch { throw failure('MALFORMED_DIRECT_RESPONSE'); }
+          if (!row || typeof row !== 'object' || Array.isArray(row)) throw failure('MALFORMED_DIRECT_RESPONSE');
+          report.direct.identity = identity(row);
+          if (!valid(report.direct.identity)) throw failure('DIRECT_RELEASE_IDENTITY_MISMATCH');
+        } catch (e) { report.failures.push('DIRECT_' + (e.code || 'INTERNAL_FAILURE')); }
+      } catch (e) { report.failures.push(e.code || 'INTERNAL_DIAGNOSTIC_FAILURE'); }
+      finally {
+        report.result = report.failures.length ? 'BLOCKED' : 'DIAGNOSTIC_IDENTITIES_VALID_NO_PUBLICATION_AUTHORITY';
+        if (report.failures.length) process.exitCode = 1;
+        try {
+          fs.writeFileSync('publication-evidence/draft-access-diagnostic.json', JSON.stringify(report, null, 2) + '\n');
+          console.log(JSON.stringify(report));
+        } catch { process.exitCode = 1; console.error('DIAGNOSTIC_EVIDENCE_WRITE_FAILED'); }
+      }
+    }
+    main();
   DRAFT_LOOKUP_JS: |
     'use strict';
     const fs = require('node:fs');
@@ -273,8 +370,32 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MODE" == inspect || "$MODE" == authorize || "$MODE" == publish || "$MODE" == publish-first || "$MODE" == verify-public ]]
           if [[ "$MODE" == inspect || "$MODE" == publish || "$MODE" == publish-first ]]; then [[ "$ASSET" =~ ^[1-9][0-9]{0,19}$ ]]; fi
+  diagnose-draft:
+    if: inputs.mode == 'inspect' && github.ref == 'refs/heads/main'
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Diagnose pinned draft access without changing release identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          ASSET: ${{ inputs.draft_asset_id }}
+        run: |
+          set -euo pipefail
+          node -e "$DRAFT_DIAGNOSTIC_JS"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
+        if: always()
+        with:
+          name: draft-access-diagnostic
+          path: publication-evidence/draft-access-diagnostic.json
+          if-no-files-found: error
+          retention-days: 14
   inspect:
-    if: inputs.mode == 'inspect' || inputs.mode == 'publish' || inputs.mode == 'publish-first'
+    if: github.ref == 'refs/tags/v1.2.1' && (inputs.mode == 'inspect' || inputs.mode == 'publish' || inputs.mode == 'publish-first')
     runs-on: ubuntu-24.04
     needs: guard
     timeout-minutes: 10
