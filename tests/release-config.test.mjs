@@ -43,6 +43,119 @@ test('Docker build retains regression inputs and bundles application and data li
   assert.equal(await read('dist/licenses/CC-BY-4.0.txt'),await read('data/CC-BY-4.0.txt'));
 });
 
+test('builder pins supported npm maintenance before lockfile installation without runtime changes', async () => {
+  const dockerfile = await read('Dockerfile');
+  const [builder, runtime] = dockerfile.split(/\nFROM nginx:/);
+  const install = 'npm install --global /tmp/zevyrn-npm-tool/npm-11.21.1.tgz --ignore-scripts --no-audit --no-fund';
+  assert.ok(builder.includes(install));
+  assert.match(builder, /test "\$\(npm --version\)" = "11\.21\.1"/);
+  assert.ok(builder.indexOf(install) < builder.indexOf('COPY package.json package-lock.json ./'));
+  assert.match(builder, /RUN npm ci --no-audit --no-fund/);
+  assert.doesNotMatch(builder, /npm (?:update|audit fix)|--force|--legacy-peer-deps/);
+  assert.doesNotMatch(runtime, /npm install|npm@11\.21\.1/);
+  assert.equal(JSON.parse(await read('package.json')).devDependencies['@typescript/typescript6'], '6.0.2');
+  assert.equal(JSON.parse(await read('package.json')).devDependencies.typescript, undefined);
+  const lock = JSON.parse(await read('package-lock.json'));
+  assert.equal(lock.packages['node_modules/@typescript/typescript6'].version, '6.0.2');
+  assert.equal(lock.packages['node_modules/@typescript/old'].name, 'typescript');
+  assert.equal(lock.packages['node_modules/@typescript/old'].version, '6.0.3');
+  assert.equal(lock.packages['node_modules/@typescript/typescript6'].dependencies['@typescript/old'], 'npm:typescript@^6');
+  assert.equal(lock.packages['node_modules/typescript'], undefined);
+  assert.ok(!Object.keys(lock.packages).some(p=>p.startsWith('node_modules/@typescript/typescript-')));
+});
+
+test('builder verifies frozen artifact bytes and identity before npm installation', async () => {
+  const builder = (await read('Dockerfile')).split(/\nFROM nginx:/)[0];
+  const code = builder.match(/&& node -e '([^']+)'/)[1];
+  const expected = 'sha512-YTzL6QBEJXyHcTu0JiUc7RKMp+mzlJtl7rGLmERaXUQeFHIMc9atdr6G9M9C8vDWbv40epoTQAzNL2/PtZVDhQ==';
+  assert.ok(code.includes(expected));
+  assert.ok(builder.indexOf('&& node -e') < builder.indexOf('&& npm install --global'));
+  assert.match(builder, /npm pack npm@11\.21\.1 --registry=https:\/\/registry\.npmjs\.org --ignore-scripts --json --pack-destination/);
+  const directory = await mkdtemp(join(tmpdir(),'zevyrn-npm-integrity-'));
+  try {
+    const root = directory.replaceAll('\\','/')+'/';
+    const isolated = code.replace('root="/tmp/zevyrn-npm-tool/"','root='+JSON.stringify(root));
+    const artifact = Buffer.from('synthetic npm artifact, not a distributable package');
+    const digest = 'sha512-'+createHash('sha512').update(artifact).digest('base64');
+    const metadata = {name:'npm',version:'11.21.1',filename:'npm-11.21.1.tgz',integrity:expected};
+    await writeFile(join(directory,metadata.filename),artifact);
+    await writeFile(join(directory,'pack.json'),JSON.stringify([metadata]));
+    // Only this isolated control replaces the frozen digest to test the hash algorithm.
+    const synthetic = isolated.replaceAll(expected,digest);
+    await writeFile(join(directory,'pack.json'),JSON.stringify([{...metadata,integrity:digest}]));
+    assert.equal(spawnSync(process.execPath,['-e',synthetic]).status,0);
+    await writeFile(join(directory,metadata.filename),Buffer.concat([artifact,Buffer.from('tampered')]));
+    assert.notEqual(spawnSync(process.execPath,['-e',synthetic]).status,0);
+    await writeFile(join(directory,metadata.filename),artifact);
+    for (const change of [{integrity:undefined},{integrity:'sha512-invalid'},{name:'substitute'},{version:'11.21.2'},{filename:'../escape.tgz'}]) {
+      await writeFile(join(directory,'pack.json'),JSON.stringify([{...metadata,integrity:digest,...change}]));
+      assert.notEqual(spawnSync(process.execPath,['-e',synthetic]).status,0);
+    }
+    for (const rows of [[],[metadata,metadata],{},null,{0:{...metadata,integrity:digest},length:1}]) {
+      await writeFile(join(directory,'pack.json'),JSON.stringify(rows));
+      assert.notEqual(spawnSync(process.execPath,['-e',isolated]).status,0);
+    }
+  } finally { await rm(directory,{recursive:true,force:true}); }
+});
+
+test('runtime port reset uses the complete patched pinned filesystem without ownership overrides', async () => {
+  const dockerfile = await read('Dockerfile');
+  assert.match(dockerfile, /^FROM nginx:1\.30\.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5 AS runtime-rootfs$/m);
+  const [before, final] = dockerfile.split(/^FROM scratch AS runtime$/m);
+  assert.ok(final, 'a fresh final configuration must not inherit the base ExposedPorts');
+  assert.match(before, /RUN apk add --no-cache --upgrade \\\n\s+libexpat=2\.9\.0-r0 zlib=1\.3\.2-r1/);
+  assert.match(before, /COPY nginx\.conf \/etc\/nginx\/nginx\.conf/);
+  assert.match(before, /COPY --from=build --chown=10001:10001 \/app\/dist \/usr\/share\/nginx\/html/);
+  assert.deepEqual(final.match(/^COPY .+$/gm), ['COPY --from=runtime-rootfs / /']);
+  assert.doesNotMatch(final, /^(?:RUN|ADD|FROM|VOLUME|ONBUILD)\s/m);
+  assert.deepEqual(final.match(/^EXPOSE .+$/gm), ['EXPOSE 8080']);
+});
+
+test('runtime HIGH fix pins libx11 without removing dependencies or expanding APK upgrades', async () => {
+  const dockerfile = await read('Dockerfile');
+  const expected = 'RUN apk add --no-cache --upgrade \\\n      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0';
+  const verify = text => {
+    const stage = text.split(/^FROM nginx:[^\n]+ AS runtime-rootfs$/m)[1]?.split(/^FROM scratch AS runtime$/m)[0];
+    assert.ok(stage, 'the existing pinned runtime stages must remain');
+    assert.deepEqual(stage.match(/^RUN [^\n]*(?:\n[ \t]+[^\n]*)*/gm), [expected]);
+    assert.doesNotMatch(stage, /apk del|--allow-untrusted|--repository|--repositories-file|\/edge\/|\/testing\//);
+  };
+  verify(dockerfile);
+  for (const changed of [
+    dockerfile.replace(' libx11=1.8.14-r0', ''),
+    dockerfile.replace('libx11=1.8.14-r0', 'libx11=1.8.13-r0'),
+    dockerfile.replace('libx11=1.8.14-r0', 'libx11'),
+    dockerfile.replace('libx11=1.8.14-r0', 'libx11=1.8.14-r0 libxpm'),
+    dockerfile.replace(expected, expected+'\nRUN apk upgrade'),
+    dockerfile.replace(expected, expected+'\nRUN apk del libx11'),
+    dockerfile.replace('--no-cache --upgrade', '--no-cache --upgrade --allow-untrusted'),
+    dockerfile.replace('--no-cache --upgrade', '--no-cache --upgrade --repository https://dl-cdn.alpinelinux.org/alpine/edge/main'),
+  ]) assert.throws(() => verify(changed));
+});
+
+test('fresh runtime configuration preserves pinned base environment and graceful stop semantics', async () => {
+  const final = (await read('Dockerfile')).split(/^FROM scratch AS runtime$/m)[1];
+  assert.ok(final);
+  const env = final.match(/^ENV (?:.*\\\n)*.*$/m)?.[0].replace(/\\\n\s*/g, ' ').slice(4).trim().split(/\s+/);
+  assert.deepEqual(env, [
+    'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    'NGINX_VERSION=1.30.6', 'PKG_RELEASE=1', 'DYNPKG_RELEASE=1',
+    'NJS_VERSION=1.0.2', 'NJS_RELEASE=1', 'ACME_VERSION=0.4.1',
+  ]);
+  assert.match(final, /^WORKDIR \/$/m);
+  assert.match(final, /^STOPSIGNAL SIGQUIT$/m);
+  assert.match(final, /maintainer="NGINX Docker Maintainers <docker-maint@nginx\.com>"/);
+});
+
+test('final runtime keeps the approved non-root user, exact healthcheck and direct nginx startup', async () => {
+  const final = (await read('Dockerfile')).split(/^FROM scratch AS runtime$/m)[1];
+  assert.ok(final);
+  assert.deepEqual(final.match(/^USER .+$/gm), ['USER 10001:10001']);
+  assert.deepEqual(final.match(/^HEALTHCHECK .+$/gm), ['HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1']);
+  assert.deepEqual(final.match(/^ENTRYPOINT .+$/gm), ['ENTRYPOINT ["nginx"]']);
+  assert.deepEqual(final.match(/^CMD .+$/gm), ['CMD ["-g", "daemon off;"]']);
+});
+
 test('proxy routes use existing certificates without Docker discovery', async () => {
   const staticConfig=await read('examples/traefik/traefik.yaml');
   const dynamic=await read('examples/traefik/dynamic/keysmith.yaml');
@@ -73,12 +186,12 @@ test('release metadata agrees and historical dictionary provenance stays unchang
   assert.equal(pkg.name,'zevyrn');
   assert.equal(lock.name,pkg.name);
   assert.equal(lock.packages[''].name,pkg.name);
-  assert.equal(pkg.version,'1.2.0');
+  assert.equal(pkg.version,'1.2.1');
   assert.equal(lock.version,pkg.version);
   assert.equal(lock.packages[''].version,pkg.version);
   assert.match(await read('Dockerfile'),/org.opencontainers.image.title="Zevyrn"/);
-  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.0"/);
-  assert.match(await read('public/index.html'),/class="version">v1.2.0/);
+  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.1"/);
+  assert.match(await read('public/index.html'),/class="version">v1.2.1/);
   assert.equal(JSON.parse(await read('data/readability-overrides.json')).version,'0.4.0');
 });
 
@@ -100,7 +213,7 @@ test('all legacy installation and proxy entry points retain their v1.1.0 content
 
 function legacyEquivalent(config) {
   return config
-    .replaceAll('zevyrn:1.2.0-local','keysmith:1.0.0-local')
+    .replaceAll('zevyrn:1.2.1-local','keysmith:1.0.0-local')
     .replaceAll('${ZEVYRN_PORT:-${KEYSMITH_PORT:-18080}}','${KEYSMITH_PORT:-18080}')
     .replaceAll('${ZEVYRN_DOMAIN:-${KEYSMITH_DOMAIN:?Set ZEVYRN_DOMAIN or KEYSMITH_DOMAIN in .env}}','${KEYSMITH_DOMAIN:?Set KEYSMITH_DOMAIN in .env}')
     .replaceAll('${ZEVYRN_BIND_IP:-${KEYSMITH_BIND_IP:?Set ZEVYRN_BIND_IP or KEYSMITH_BIND_IP in .env}}','${KEYSMITH_BIND_IP:?Set KEYSMITH_BIND_IP in .env}')
@@ -116,7 +229,7 @@ test('native configurations preserve the complete legacy security and networking
     const native=await read('compose.zevyrn'+suffix+'.yaml');
     assert.equal(legacyEquivalent(native),await read('compose'+suffix+'.yaml'));
     assert.match(native,/^  zevyrn:$/m);
-    assert.match(native,/image: zevyrn:1\.2\.0-local/);
+    assert.match(native,/image: zevyrn:1\.2\.1-local/);
     assert.match(native,new RegExp('^name: zevyrn'+suffix.replace('.','-')+'$','m'));
     const app=native.split(/\n  (?:traefik|caddy):/)[0];
     assert.doesNotMatch(app,/cap_add:/);
@@ -187,7 +300,11 @@ test('native example uses canonical settings and Docker build includes regressio
 
 // No daemon, containers, networks or ports are used: this calls only the real
 // Compose configuration loader. Optional because the source build has no Docker.
-const composeAvailable=spawnSync('docker',['compose','version','--short'],{encoding:'utf8'}).status===0;
+// A standalone official Compose binary supports daemon-free local validation.
+// CI still uses the normal Docker CLI plugin unless this test-only override is set.
+const composeCommand=process.env.ZEVYRN_COMPOSE_BIN||'docker';
+const composePrefix=process.env.ZEVYRN_COMPOSE_BIN?[]:['compose'];
+const composeAvailable=spawnSync(composeCommand,[...composePrefix,'version','--short'],{encoding:'utf8'}).status===0;
 test('Compose CLI renders both families and enforces .env/shell precedence and required settings',
   {skip:!composeAvailable&&'Docker Compose CLI unavailable; operator checks above are not Compose rendering'}, async () => {
   const root=fileURLToPath(new URL('../',import.meta.url));
@@ -197,7 +314,7 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
   const cleanEnv=Object.fromEntries(Object.entries(process.env).filter(([key])=>! /^(?:ZEVYRN_|KEYSMITH_|COMPOSE_)/.test(key)));
   async function render(file,settings={},shellValues={}) {
     await writeFile(envFile,Object.entries(settings).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
-    return spawnSync('docker',['compose','--project-directory',root,'--env-file',envFile,'-p','zevyrn-config-test','-f',join(root,file),'config','--format','json'],
+    return spawnSync(composeCommand,[...composePrefix,'--project-directory',root,'--env-file',envFile,'-p','zevyrn-config-test','-f',join(root,file),'config','--format','json'],
       {env:{...cleanEnv,...shellValues},encoding:'utf8'});
   }
   try {
@@ -211,7 +328,7 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
         const result=await render(file,settings);
         assert.ifError(result.error); assert.equal(result.status,0,result.stderr);
         const config=JSON.parse(result.stdout),app=config.services[service];
-        assert.equal(app.image,family==='native'?'zevyrn:1.2.0-local':'keysmith:1.0.0-local');
+        assert.equal(app.image,family==='native'?'zevyrn:1.2.1-local':'keysmith:1.0.0-local');
         assert.equal(app.user,'10001:10001'); assert.equal(app.read_only,true);
         assert.deepEqual(app.cap_drop,['ALL']); assert.ok(app.security_opt.includes('no-new-privileges:true'));
         if(suffix) {

@@ -39,7 +39,7 @@ try{
  const noOverflow=async()=>assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No horizontal page overflow');
  const noObscuring=async()=>{await settle();assert.ok(await page.locator('#generate').evaluate(e=>getComputedStyle(e).position!=='fixed'),'Generate stays in normal flow');};
  await page.goto('http://127.0.0.1:4173/',{waitUntil:'networkidle'});
- await page.locator('#theme').selectOption('light');
+ await page.locator('#theme').selectOption('zevyrn');
  for(const width of [1280,768,390,320]){
   await page.setViewportSize({width,height:1000});await page.reload({waitUntil:'networkidle'});
   assert.equal(await page.locator('#settings-disclosure').evaluate(e=>e.open),false,'Settings initially closed at every width');
@@ -52,18 +52,18 @@ try{
     const box=await target.boundingBox();assert.ok(box.width>=44&&box.height>=44,'Mobile controls retain 44px touch targets');
    }
   }
-  const shot=artifact('light-'+width+'.png');await page.screenshot({path:shot,fullPage:true});results.screenshots.push(shot);
+  const shot=artifact('zevyrn-'+width+'.png');await page.screenshot({path:shot,fullPage:true});results.screenshots.push(shot);
   results.layouts.push({width,pass:true});
   if(width===1280||width===390){
-   await page.locator('#theme').selectOption('dark');await page.evaluate(()=>document.activeElement?.blur());
-   const darkShot=artifact('dark-'+width+'.png');await page.screenshot({path:darkShot,fullPage:true});results.screenshots.push(darkShot);
-   await page.locator('#theme').selectOption('light');await openSettings();
+   await page.locator('#theme').selectOption('midnight');await page.evaluate(()=>document.activeElement?.blur());
+   const darkShot=artifact('midnight-'+width+'.png');await page.screenshot({path:darkShot,fullPage:true});results.screenshots.push(darkShot);
+   await page.locator('#theme').selectOption('zevyrn');await openSettings();
    await page.locator('#advanced').evaluate(e=>e.open=true);const settingsShot=artifact('settings-'+width+'.png');await page.screenshot({path:settingsShot,fullPage:false});results.screenshots.push(settingsShot);await page.locator('#advanced').evaluate(e=>e.open=false);await closeSettings();
   }
 
   if(width===1280||width===390){
    await page.locator('#count').selectOption('5');await page.locator('#generate').click();await closeSettings();await page.evaluate(()=>scrollTo(0,0));
-   const batchShot=artifact('light-batch-'+width+'.png');await page.screenshot({path:batchShot,fullPage:true});results.screenshots.push(batchShot);
+   const batchShot=artifact('zevyrn-batch-'+width+'.png');await page.screenshot({path:batchShot,fullPage:true});results.screenshots.push(batchShot);
   }
   for(const profile of ['readable','strong-random','custom-policy'])for(const count of ['1','5','10','20']){
    await page.locator('#count').selectOption(count);await openSettings();await selectProfile(page,profile);

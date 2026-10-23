@@ -1,8 +1,8 @@
-# Zevyrn
+# Zevyrn (pronounced “ZEV-urn”)
 
 **Secure passwords. Easy on the eyes.**
 
-Current application version: **1.2.0**.
+Current application version: **1.2.1**.
 
 Self-hosted password generation in your browser. Zevyrn provides Readable,
 Strong Random and Custom Policy profiles, single-password and batch views,
@@ -12,46 +12,65 @@ Passwords are generated on your device using Web Crypto. There is no backend
 password storage, telemetry or external dictionary service. Only the selected
 theme is saved. Clear does not erase OS clipboard history or securely wipe memory.
 
-## Install from source
+## Install the prebuilt container (recommended)
 
-There is currently no official published Zevyrn container image. Build from
-this repository; the new-install image is named `zevyrn:1.2.0-local`.
-Existing installations retain their original configuration and image names.
+The planned release image is `ghcr.io/thestateofwhere/zevyrn:1.2.1`
+for **Linux/amd64**. **Release preparation: this image has not been published or
+verified in GHCR yet.** The commands below become usable after publication and
+verification; do not substitute an unverified third-party image.
 
-Requirements: Linux/amd64 containers, Git, maintained Docker Engine 28 or newer,
-Docker Compose plugin with `--wait`, and Buildx. Docker Desktop must use Linux
-containers. Node/npm are included in the build; they are not host prerequisites.
-The first build needs access to container registries, npm and Alpine repositories.
-
-On Ubuntu, follow [Docker's official apt repository setup](https://docs.docker.com/engine/install/ubuntu/#install-using-the-apt-repository),
-including the Compose and Buildx plugins. Do not reinstall Docker if it is already
-working. Commands below use a POSIX shell; prefix Docker commands with `sudo` if
-your account does not have Docker access.
+Use a maintained Docker Engine 28 or newer (or Docker Desktop in Linux-container
+mode) and Docker Compose v2 or newer with `--wait` and `--wait-timeout`. Git, Node.js, npm
+and Buildx are not needed to run the prebuilt image. Download
+[`compose.ghcr.yaml`](compose.ghcr.yaml) from the intended published release into
+an otherwise empty directory. Commands use a POSIX shell; use your existing
+Docker access method, including `sudo` if required.
 
 ```sh
-git clone https://github.com/TheStateOfWhere/zevyrn-password-generator.git zevyrn-password-generator
-cd zevyrn-password-generator
 docker version
 docker compose version
-docker buildx version
-docker compose -p zevyrn -f compose.zevyrn.yaml build zevyrn
-docker compose -p zevyrn -f compose.zevyrn.yaml up -d --no-build --pull never --wait --wait-timeout 120
+docker compose -p zevyrn -f compose.ghcr.yaml config
+docker compose -p zevyrn -f compose.ghcr.yaml pull zevyrn
+docker compose -p zevyrn -f compose.ghcr.yaml up -d --no-build --pull never --wait --wait-timeout 120 zevyrn
 curl --fail http://127.0.0.1:18080/healthz
 ```
 
-Expect `ok`. Open **http://localhost:18080** on the Docker host. If Docker runs on
-a remote server, localhost refers to that server; use the HTTPS instructions below
-for remote browser access. This loopback-only setup does not publish the app to
-other machines. Change its port with `ZEVYRN_PORT=18081 docker compose -p zevyrn -f compose.zevyrn.yaml ...` and
-use the same setting for subsequent commands.
+Expect `ok`, then open **http://localhost:18080** on the Docker host. The container
+listens on **8080**; this example binds host **18080 to loopback only**. There is
+no database, persistent app volume or required application environment variable.
+`ZEVYRN_PORT` changes the host port; `ZEVYRN_IMAGE` selects an explicit published
+tag or `ghcr.io/thestateofwhere/zevyrn@sha256:<published-manifest-digest>`.
+Keep overrides in your own `.env` and use the same settings on every command.
+See [installation and updates](INSTALLATION.md#prebuilt-image-recommended).
 
-The Dockerfile runs the application tests during the build. Builds intentionally
-fail when pinned inputs are unavailable; do not bypass tests or remove the pins.
+For remote browsers, use a reverse proxy with HTTPS and a hostname/certificate
+that you control. Localhost or a secure HTTPS context is required for copying;
+plain HTTP on a remote IP is insufficient. No particular host, shared network,
+certificate authority or existing proxy is assumed.
+
+## Optional developer source build
+
+To build locally, clone this repository, select the intended release tag or
+reviewed commit, and use `compose.zevyrn.yaml`. Git and Buildx are needed in
+addition to Docker/Compose; Node/npm run inside the builder. The first build
+needs container registries, npm and Alpine repositories.
+
+```sh
+git clone https://github.com/TheStateOfWhere/zevyrn-password-generator.git
+cd zevyrn-password-generator
+# After release publication: git checkout --detach v1.2.1
+docker compose -p zevyrn -f compose.zevyrn.yaml build zevyrn
+docker compose -p zevyrn -f compose.zevyrn.yaml up -d --no-build --pull never --wait --wait-timeout 120
+```
+
+The local image is `zevyrn:1.2.1-local`. Tests run during the build. A new source
+build is a different artifact and does not inherit the retained release image's
+qualification. Do not bypass tests or pinned inputs.
 
 ## HTTPS: choose Traefik or Caddy
 
-See [INSTALLATION.md](INSTALLATION.md) for complete commands using an existing
-certificate. Both examples create their own project network, publish only TCP 443,
+The optional source-build proxy examples in [INSTALLATION.md](INSTALLATION.md) use an existing
+certificate. Both source-build examples create their own project network, publish only TCP 443,
 and route to `zevyrn:8080`. No Docker socket or external proxy network is needed.
 Use one complete Compose file at a time; do not combine the alternatives.
 
@@ -76,8 +95,8 @@ and the [update commands](INSTALLATION.md#updates).
 ## Troubleshooting
 
 ```sh
-docker compose -p zevyrn -f compose.zevyrn.yaml ps
-docker compose -p zevyrn -f compose.zevyrn.yaml logs --tail 100 zevyrn
+docker compose -p zevyrn -f compose.ghcr.yaml ps
+docker compose -p zevyrn -f compose.ghcr.yaml logs --tail 100 zevyrn
 curl --fail http://127.0.0.1:18080/healthz
 ```
 
@@ -86,7 +105,7 @@ status or logs. A 502 usually means the app is unhealthy or the proxy cannot rea
 `zevyrn:8080`. A certificate warning means the hostname, chain, expiry or client
 trust needs attention; do not treat `curl -k` as a successful HTTPS test.
 If a port is occupied, choose another port or host address; do not stop another
-application. A missing local image requires the explicit build step above.
+application. For prebuilt installs, pull the selected published image; for developer installs, build explicitly.
 See [INSTALLATION.md](INSTALLATION.md) for updates and removal.
 
 ## Existing installations

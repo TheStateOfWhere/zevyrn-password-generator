@@ -1,10 +1,10 @@
 {
   "name": "zevyrn",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/dictionary.mjs && tsc && node scripts/build.mjs",
+    "build": "node scripts/dictionary.mjs && node scripts/verify-compiler.mjs && tsc6 && node scripts/build.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "dev": "node scripts/serve.mjs"
   },
@@ -12,6 +12,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "typescript": "7.0.2"
+    "playwright": "1.62.1",
+    "@typescript/typescript6": "6.0.2"
   }
 }

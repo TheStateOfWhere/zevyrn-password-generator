@@ -1,0 +1,129 @@
+name: Quality and security
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TRIVY_DISABLE_TELEMETRY: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          cache: npm
+      - name: Locked dependencies and tools
+        run: |
+          npm ci --no-audit --no-fund
+          docker version
+          docker buildx version
+          docker compose version
+      - name: Application, actual Compose configuration, types and build
+        run: |
+          npm test
+          npx --no-install tsc6 --noEmit
+          git diff --exit-code -- src data public
+      - name: npm dependency audit
+        shell: bash
+        run: |
+          set +e
+          npm audit --json > "$RUNNER_TEMP/npm-audit.json"
+          audit_status=$?
+          set -e
+          test "$audit_status" -le 1
+          node scripts/ci-security.mjs npm "$RUNNER_TEMP/npm-audit.json" artifacts/security/npm-audit.json
+      - name: Build separate builder and runtime images
+        run: |
+          docker build --platform linux/amd64 --target build -t zevyrn-ci-builder .
+          docker build --platform linux/amd64 -t zevyrn-ci-runtime .
+          mkdir -p artifacts/security
+          docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}} user={{with index .Config "User"}}{{.}}{{else}}0 (Docker default){{end}}' zevyrn-ci-builder > artifacts/security/image-identities.txt
+          docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}} user={{.Config.User}}' zevyrn-ci-runtime >> artifacts/security/image-identities.txt
+          test "$(docker image inspect --format '{{.Config.User}}' zevyrn-ci-runtime)" = '10001:10001'
+          printf 'source=%s\n' "$GITHUB_SHA" >> artifacts/security/image-identities.txt
+          docker image inspect --format 'registry-digests={{json .RepoDigests}}' zevyrn-ci-builder zevyrn-ci-runtime >> artifacts/security/image-identities.txt
+          grep '^FROM ' Dockerfile >> artifacts/security/image-identities.txt
+          docker save -o "$RUNNER_TEMP/runtime.tar" zevyrn-ci-runtime
+          docker save -o "$RUNNER_TEMP/builder.tar" zevyrn-ci-builder
+      - name: Verified scanner and fresh vulnerability database
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy-bin"
+          curl --fail --location --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz -o "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/trivy-bin" trivy
+          echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/trivy-bin/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --download-db-only
+          "$RUNNER_TEMP/trivy-bin/trivy" --cache-dir "$RUNNER_TEMP/trivy-cache" version --format json > artifacts/security/scanner-version.json
+          date --utc --iso-8601=seconds > artifacts/security/scan-start.txt
+      - name: Scan runtime and builder, generate runtime SBOM
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          trivy image --input "$RUNNER_TEMP/runtime.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/runtime-raw.json"
+          trivy image --input "$RUNNER_TEMP/builder.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/builder-raw.json"
+          trivy image --input "$RUNNER_TEMP/runtime.tar" --format cyclonedx --output artifacts/security/runtime-sbom.cdx.json
+          node scripts/ci-security.mjs trivy "$RUNNER_TEMP/runtime-raw.json" artifacts/security/runtime-scan.json "$RUNNER_TEMP/builder-raw.json" artifacts/security/builder-scan.json
+      - name: Isolated runtime health and permissions
+        shell: bash
+        run: |
+          container="zevyrn-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$container" --network none --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 128m --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 zevyrn-ci-runtime
+          for attempt in $(seq 1 30); do
+            if docker exec "$container" wget -qO /dev/null http://127.0.0.1:8080/healthz; then break; fi
+            sleep 1
+          done
+          test "$(docker exec "$container" wget -qO- http://127.0.0.1:8080/healthz)" = ok
+          docker exec "$container" sh -ec 'test "$(id -u)" = 10001; nginx -v; apk info -v libexpat zlib; ! command -v node; ! command -v npm; ! test -d /app/node_modules'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-evidence
+          path: artifacts/security/
+          retention-days: 7
+          if-no-files-found: warn
+
+  browser:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          cache: npm
+      - name: Locked browser tooling and application build
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Eight maintained Edge browser suites
+        shell: pwsh
+        run: |
+          $env:KEYSMITH_BROWSER_PATH = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          if (!(Test-Path -LiteralPath $env:KEYSMITH_BROWSER_PATH)) { throw 'Microsoft Edge is unavailable' }
+          $env:KEYSMITH_PLAYWRIGHT_MODULE = Join-Path $PWD 'node_modules/playwright'
+          $suites = @('selection','keysmith','profiles','themes','contrast-regression','ui-corrections','focus-copy','regeneration')
+          foreach ($suite in $suites) {
+            node "tests/browser-$suite.mjs"
+            if ($LASTEXITCODE -ne 0) { throw "Browser suite failed: $suite" }
+          }

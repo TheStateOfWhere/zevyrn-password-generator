@@ -36,7 +36,7 @@ try{
  assert.equal(await page.getByRole('link',{name:'Zevyrn home',exact:true}).count(),1);
  assert.equal(await page.locator('.brand svg').count(),1);
  assert.match(await page.locator('footer').textContent(),/Zevyrn/);
- assert.equal(await page.locator('.version').textContent(),'v1.2.0');
+ assert.equal(await page.locator('.version').textContent(),'v1.2.1');
  await page.locator('#generate').click();
  const shot=async name=>{const path=artifact(name+'.png');await page.screenshot({path,fullPage:true});results.screenshots.push(path);};
  const surfaces=new Map();

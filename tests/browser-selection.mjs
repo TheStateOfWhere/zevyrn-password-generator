@@ -1,6 +1,6 @@
 import {openSettings,closeSettings} from './browser-dialog.mjs';
-// Optional real-browser regression check. Uses externally supplied Playwright;
-// no application dependency is added. Only deterministic public fixtures are generated.
+// Real-browser regression check using the locked development-only Playwright.
+// Only deterministic public fixtures are generated.
 import assert from 'node:assert/strict';
 import { screenshotDirectory } from './browser-artifacts.mjs';
 const screenshotPath = await screenshotDirectory('selection');

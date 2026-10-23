@@ -6,7 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: zevyrn:1.2.0-local
+    image: zevyrn:1.2.1-local
     pull_policy: never
     restart: unless-stopped
     user: "10001:10001"

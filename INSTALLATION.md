@@ -1,13 +1,108 @@
 # Docker installation
 
-These instructions target **Zevyrn v1.2.0** from the
+These instructions target **Zevyrn v1.2.1** from the
 [canonical GitHub repository](https://github.com/TheStateOfWhere/zevyrn-password-generator).
 See the [rename notes](docs/REPOSITORY-RENAME.md) for the completed repository
 rename and retained configuration identifiers.
 
-Build from source as shown in [README.md](README.md). No public Zevyrn registry
-image is currently provided. The standalone default needs no environment file.
-For remote browser access, choose one HTTPS alternative below.
+## Prebuilt image (recommended)
+
+Planned public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.1`**, Linux/amd64.
+**Not yet published or registry-verified during release preparation.** Use these
+instructions after the release image and its registry digest are published.
+A local Docker image ID is not a registry manifest digest.
+
+Requirements: maintained Docker Engine 28+ or Docker Desktop using Linux
+containers, and Docker Compose v2 or newer supporting `--wait` and `--wait-timeout`.
+No host Node/npm, source checkout, database or persistent app volume is needed.
+Download `compose.ghcr.yaml` from the intended published release into a new
+directory. It contains only the `zevyrn` app service, no build directive, Docker
+socket, host bind mounts or external networks. Commands use a POSIX shell.
+Use your existing Docker access method; do not change daemon permissions.
+
+```sh
+docker compose -p zevyrn -f compose.ghcr.yaml config
+docker compose -p zevyrn -f compose.ghcr.yaml pull zevyrn
+docker compose -p zevyrn -f compose.ghcr.yaml up -d --no-build --pull never --wait --wait-timeout 120 zevyrn
+docker compose -p zevyrn -f compose.ghcr.yaml ps
+curl --fail http://127.0.0.1:18080/healthz
+```
+
+Expect HTTP 200 and `ok`. Open `http://localhost:18080` on that same host.
+The app listens on container port 8080; the sample publishes loopback port 18080.
+Its built-in health check queries `/healthz` inside the container. It runs as
+UID/GID 10001:10001, with a read-only filesystem, dropped capabilities,
+no-new-privileges and bounded tmpfs, memory, CPU and process limits.
+
+Optional `.env` entries (the app requires no environment configuration):
+
+```dotenv
+ZEVYRN_PORT=18080
+ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.1
+```
+
+Use an explicit version rather than `latest`. For immutable selection, replace
+the image with `ghcr.io/thestateofwhere/zevyrn@sha256:<published-manifest-digest>`
+after obtaining the real manifest digest from the release. The placeholder is
+not runnable. Shell variables override `.env`; keep the same settings for every
+command. Public GHCR packages can be pulled anonymously once made public.
+Registry access is needed for the initial pull and updates.
+
+### Optional reverse proxy
+
+For a proxy on the Docker host, route your own HTTPS hostname to
+`http://127.0.0.1:18080`. Configure a valid matching certificate and normal browser
+trust. If a proxy runs in another container, its localhost is not the app:
+connect it and Zevyrn to an explicitly chosen dedicated network and route to
+`http://zevyrn:8080`, or use your reviewed host-routing arrangement. Such a
+network change is operator configuration, not included in `compose.ghcr.yaml`.
+Do not expose the Docker API or mount its socket for application operation.
+No particular infrastructure, external proxy network or private CA is required.
+Copy requires localhost or HTTPS; remote plain HTTP is not a secure context.
+The app has no login; control access at your proxy/network. The source-build
+Traefik/Caddy files below are complete alternatives using your own existing
+certificate, not overlays on `compose.ghcr.yaml`, and build separate local images.
+
+### Updating a prebuilt installation
+
+Read the new release notes, then set `ZEVYRN_IMAGE` in your `.env` to the desired
+published version or digest. Preserve the same project, file and port settings:
+
+```sh
+docker compose -p zevyrn -f compose.ghcr.yaml config
+docker compose -p zevyrn -f compose.ghcr.yaml pull zevyrn
+docker compose -p zevyrn -f compose.ghcr.yaml up -d --no-build --pull never --no-deps --wait --wait-timeout 120 zevyrn
+curl --fail http://127.0.0.1:18080/healthz
+```
+
+Use your configured port and test the HTTPS route if present. No automatic
+updater is enabled. For an existing legacy installation preserve its project,
+service and settings; change only its reviewed app image reference. See
+[existing installations](#existing-installations). To remove this installation
+use `docker compose -p zevyrn -f compose.ghcr.yaml down` with its actual settings;
+do not add broad prune or volume-removal commands.
+
+### Offline operation and privacy
+
+Once the image and app assets are available, generation works without Internet
+access. The browser must still reach your local server to load/reload the app;
+this is not an installed offline PWA. An air-gapped Docker host can load an image
+archive transferred from a trusted machine: verify the archive hash and image
+identity against the release information, then use the loaded tag with
+`--pull never`. Never substitute an unverified image.
+Passwords use browser Web Crypto; there is no backend password storage,
+telemetry, remote dictionary service or password network request. Only the theme
+identifier is saved locally. Clear/reload does not securely wipe memory or erase
+OS clipboard history. Browsers/extensions and the OS remain trust dependencies.
+
+## Optional source-build installation
+
+The remaining sections describe developer build examples. Build from source as
+shown in [README.md](README.md); `compose.zevyrn*.yaml` uses the local
+`zevyrn:1.2.1-local` image, not GHCR. It needs Git and Buildx, with registry,
+npm and Alpine access for the first build. A new build does not inherit the
+retained release image's qualification. The standalone default needs no
+environment file. For remote browsers, choose an HTTPS alternative below.
 
 ## Choose a hostname and client trust
 
@@ -152,6 +247,9 @@ logs, screenshots or support issues.
 
 ## Updates
 
+This section applies to optional source-build installations. For the prebuilt
+image use [Updating a prebuilt installation](#updating-a-prebuilt-installation).
+
 Review the upstream release notes before updating. Start in your existing clone
 and preserve your external TLS files and `.env` settings. If `git status` shows
 local tracked-file changes, review them before switching versions; do not discard
@@ -218,7 +316,7 @@ The original `compose.yaml`, `compose.traefik.yaml`, `compose.caddy.yaml`,
 `examples/caddy/Caddyfile` remain supported and unchanged. Keep the same project,
 service, `KEYSMITH_*` settings, external certificates and any operator-specific
 proxy configuration. The local image name `keysmith:1.0.0-local` is a retained
-compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.0.
+compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.1.
 Do not switch to a Zevyrn project/service as an ordinary update: Compose would
 create a separate installation and may conflict on ports. No migration is required.
 
@@ -262,3 +360,6 @@ The external TLS files are not managed or deleted by Compose.
 References: [Docker installation](https://docs.docker.com/engine/install/ubuntu/),
 [Traefik file configuration](https://doc.traefik.io/traefik/reference/routing-configuration/other-providers/file/),
 [Caddy reverse proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy).
+
+Prebuilt-image references: [Compose up and health waiting](https://docs.docker.com/reference/cli/docker/compose/up/),
+[GHCR visibility and digest pulls](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
