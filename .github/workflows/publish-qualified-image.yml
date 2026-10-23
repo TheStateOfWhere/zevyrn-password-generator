@@ -1,0 +1,255 @@
+# Isolated proposal only. Not installed in the repository or activated.
+# Future prerequisite: owner confirms namespace/tag eligibility, then uploads the
+# exact retained OCI archive as an asset of a draft v1.2.1 release targeted at
+# the approved release commit. No DK02 connection or image rebuild is used.
+name: Publish exact qualified Zevyrn 1.2.1 image
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect archive first; publication/public verification require separate authority
+        type: choice
+        options: [inspect, authorize, publish, verify-public]
+        default: inspect
+        required: true
+      draft_asset_id:
+        description: Numeric asset ID of qualified-runtime-v1.2.1.oci.tar in the draft release
+        type: string
+        required: false
+permissions: {}
+concurrency:
+  group: zevyrn-qualified-ghcr-1.2.1
+  cancel-in-progress: false
+env:
+  REPOSITORY: TheStateOfWhere/zevyrn-password-generator
+  IMAGE: ghcr.io/thestateofwhere/zevyrn
+  INDEX: sha256:fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e
+  PLATFORM: sha256:75d744f9c4c10eeede58304cddff54530c08c9efccd0097ec24e5f074d7fa2f0
+  CONFIG: sha256:9b0d4db6534dbc82f96c0de4d71f318257716b936e17867f8595dd8fcc4e9dc8
+  ARCHIVE_SHA256: be15221c6b6b9d171d210e7c0a4b12b149601484f305b198a23d6a820865db02
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Reject wrong repository, release ref or dispatch mode
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          ASSET: ${{ inputs.draft_asset_id }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'TheStateOfWhere/zevyrn-password-generator'
+          if [[ "$MODE" == publish || "$MODE" == verify-public ]]; then
+            test "$GITHUB_REF" = 'refs/tags/v1.2.1'
+          else
+            [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == refs/tags/v1.2.1 ]]
+          fi
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MODE" == inspect || "$MODE" == authorize || "$MODE" == publish || "$MODE" == verify-public ]]
+          if [[ "$MODE" == inspect || "$MODE" == publish ]]; then [[ "$ASSET" =~ ^[1-9][0-9]{0,19}$ ]]; fi
+  inspect:
+    if: inputs.mode == 'inspect' || inputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    needs: guard
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      asset: ${{ steps.download.outputs.asset }}
+    steps:
+      - name: Authenticate draft asset and exact retained OCI archive
+        id: download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ inputs.draft_asset_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ASSET" =~ ^[1-9][0-9]{0,19}$ ]]
+          mkdir publication-evidence
+          gh api "repos/$REPOSITORY/releases/tags/v1.2.1" > "$RUNNER_TEMP/draft.json"
+          jq '{id,draft,tag_name,target_commitish}' "$RUNNER_TEMP/draft.json" > publication-evidence/draft.json
+          jq -e --arg sha "$GITHUB_SHA" '.draft == true and .tag_name == "v1.2.1" and .target_commitish == $sha' publication-evidence/draft.json
+          gh api "repos/$REPOSITORY/releases/$(jq -r .id publication-evidence/draft.json)/assets" --paginate --slurp > "$RUNNER_TEMP/assets.json"
+          jq --argjson id "$ASSET" '[.[][] | select(.id == $id) | {id,name,state,size}]' "$RUNNER_TEMP/assets.json" > publication-evidence/assets.json
+          jq -e --argjson id "$ASSET" '[.[] | select(.id == $id and .name == "qualified-runtime-v1.2.1.oci.tar" and .state == "uploaded" and .size == 26021376)] | length == 1' publication-evidence/assets.json
+          gh api "repos/$REPOSITORY/releases/assets/$ASSET" -H 'Accept: application/octet-stream' > "$RUNNER_TEMP/runtime.tar"
+          printf '%s  %s\n' "$ARCHIVE_SHA256" "$RUNNER_TEMP/runtime.tar" | sha256sum --check --strict
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,tarfile
+          expected={
+            'fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e',
+            '75d744f9c4c10eeede58304cddff54530c08c9efccd0097ec24e5f074d7fa2f0',
+            '9b0d4db6534dbc82f96c0de4d71f318257716b936e17867f8595dd8fcc4e9dc8',
+            '29ac8db0bd7aaa9fc7f42286275adca7f48e84fe41ba60f1f084f02428d89b84',
+            '3fe0a757ca1a92de24d2351c588e603520456e237755e976f0eb3a879530b83c',
+            '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+            'dffeab4431af0afa5e2dd1d461c8efee89df74a3335ba030a764889d5e06667d'}
+          with tarfile.open(pathlib.Path(os.environ['RUNNER_TEMP'])/'runtime.tar') as t:
+            rows={}
+            for h in expected:
+              p='blobs/sha256/'+h
+              matches=[m for m in t.getmembers() if m.name==p]
+              if len(matches)!=1 or not matches[0].isfile():raise ValueError('Archive member identity')
+              b=t.extractfile(matches[0]).read()
+              if hashlib.sha256(b).hexdigest()!=h:raise ValueError('Archive blob hash')
+              rows[h]=len(b)
+            config=json.load(t.extractfile('blobs/sha256/'+os.environ['CONFIG'][7:]))
+            if (config['os'],config['architecture'],config['config']['User'])!=('linux','amd64','10001:10001'):raise ValueError('Runtime platform/user')
+            if config['rootfs']['diff_ids']!=['sha256:d4e43179edd35bbb1e6b56b7c1028beb8c75bd11042819be97a6a43989f747d1']:raise ValueError('Runtime filesystem')
+          pathlib.Path('publication-evidence/archive-verification.json').write_text(json.dumps({'archiveSHA256':os.environ['ARCHIVE_SHA256'],'index':os.environ['INDEX'],'platform':os.environ['PLATFORM'],'config':os.environ['CONFIG'],'sourceManifest':'3fe846fe9808eebec37bfa79bec2a66b235a54552049a760b548bd805a929dec','blobs':rows,'releaseCommit':os.environ['GITHUB_SHA']},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
+        if: always()
+        with:
+          name: qualified-archive-inspection
+          path: publication-evidence/
+          if-no-files-found: error
+          retention-days: 14
+  authorize:
+    if: inputs.mode == 'authorize' || inputs.mode == 'publish'
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Read-only package authority and version eligibility inspection
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir publication-evidence
+          # A failed package-list request is never interpreted as package absence.
+          gh api 'users/TheStateOfWhere/packages?package_type=container&per_page=100' --paginate --slurp > "$RUNNER_TEMP/packages.json"
+          # Only target metadata enters evidence; unrelated private package names do not.
+          jq '[.[][] | select(.name == "zevyrn" and .package_type == "container") | {id,name,package_type,visibility,repository:{full_name:.repository.full_name}}]' "$RUNNER_TEMP/packages.json" > publication-evidence/target-package.json
+          count=$(jq 'length' publication-evidence/target-package.json)
+          test "$count" -le 1
+          if test "$count" -eq 1; then
+            jq -e '.[] | .repository.full_name == "TheStateOfWhere/zevyrn-password-generator"' publication-evidence/target-package.json
+            gh api 'users/TheStateOfWhere/packages/container/zevyrn/versions?per_page=100' --paginate --slurp > "$RUNNER_TEMP/versions-before.json"
+            jq -e '[.[][] | select(.metadata.container.tags | index("1.2.1"))] | length == 0' "$RUNNER_TEMP/versions-before.json" > publication-evidence/version-eligible.json
+          fi
+          printf '%s\n' 'Read-only package inspection completed. Requested repository token permissions: packages:write. Check GitHub job permission log; absence from accessible listing alone is not proof that no private/unlinked package exists. No package or version created.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
+        if: always()
+        with:
+          name: qualified-image-package-authorization
+          path: publication-evidence/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    if: github.repository == 'TheStateOfWhere/zevyrn-password-generator' && github.ref == 'refs/tags/v1.2.1' && inputs.mode == 'publish'
+    needs: [guard, inspect, authorize]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Install supported daemonless registry transfer tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          mkdir publication-evidence
+          skopeo --version > publication-evidence/skopeo-version.txt
+          dpkg-query -W skopeo > publication-evidence/skopeo-package.txt
+          sha256sum "$(command -v skopeo)" > publication-evidence/skopeo-binary-sha256.txt
+      - name: Verify package authority, reject existing version, copy exact OCI graph
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ needs.inspect.outputs.asset }}
+        run: |
+          set -euo pipefail
+          umask 077
+          auth="$RUNNER_TEMP/zevyrn-ghcr-auth.json"
+          trap 'rm -f -- "$auth"' EXIT
+          # The inspected asset ID is fixed; every downloaded byte is reauthenticated.
+          [[ "$ASSET" =~ ^[1-9][0-9]{0,19}$ ]]
+          gh api "repos/$REPOSITORY/releases/assets/$ASSET" -H 'Accept: application/octet-stream' > "$RUNNER_TEMP/runtime.tar"
+          printf '%s  %s\n' "$ARCHIVE_SHA256" "$RUNNER_TEMP/runtime.tar" | sha256sum --check --strict
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/runtime.tar" > publication-evidence/source-index.json
+          printf '%s  %s\n' "${INDEX#sha256:}" publication-evidence/source-index.json | sha256sum --check --strict
+          # Prove this installed tool can preserve the whole graph locally BEFORE login/push.
+          skopeo copy --all --preserve-digests --digestfile publication-evidence/local-copy-digest.txt "oci-archive:$RUNNER_TEMP/runtime.tar" "oci:$RUNNER_TEMP/validated-graph:qualified"
+          test "$(cat publication-evidence/local-copy-digest.txt)" = "$INDEX"
+          tar -tf "$RUNNER_TEMP/runtime.tar" | grep -E '^blobs/sha256/[a-f0-9]{64}$' > "$RUNNER_TEMP/blob-paths.txt"
+          test "$(wc -l < "$RUNNER_TEMP/blob-paths.txt")" -eq 7
+          while IFS= read -r path; do
+            printf '%s  %s\n' "${path##*/}" "$RUNNER_TEMP/validated-graph/$path" | sha256sum --check --strict
+          done < "$RUNNER_TEMP/blob-paths.txt"
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          # Recheck eligibility immediately before the write, not only in the earlier job.
+          gh api 'users/TheStateOfWhere/packages?package_type=container&per_page=100' --paginate --slurp > "$RUNNER_TEMP/packages-immediate.json"
+          jq '[.[][] | select(.name == "zevyrn" and .package_type == "container")]' "$RUNNER_TEMP/packages-immediate.json" > "$RUNNER_TEMP/target-immediate.json"
+          count=$(jq 'length' "$RUNNER_TEMP/target-immediate.json")
+          test "$count" -le 1
+          if test "$count" -eq 1; then
+            jq -e '.[] | .repository.full_name == "TheStateOfWhere/zevyrn-password-generator"' "$RUNNER_TEMP/target-immediate.json"
+            gh api 'users/TheStateOfWhere/packages/container/zevyrn/versions?per_page=100' --paginate --slurp > "$RUNNER_TEMP/versions-immediate.json"
+            jq -e '[.[][] | select(.metadata.container.tags | index("1.2.1"))] | length == 0' "$RUNNER_TEMP/versions-immediate.json" > publication-evidence/version-eligible-immediate.json
+          fi
+          # Workflow concurrency does not exclude external publishers. Owner must
+          # reserve this version; GHCR has no atomic create-if-absent tag operation.
+          skopeo copy --all --preserve-digests --authfile "$auth" --digestfile publication-evidence/copied-index-digest.txt "oci-archive:$RUNNER_TEMP/runtime.tar" "docker://$IMAGE:1.2.1"
+          test "$(cat publication-evidence/copied-index-digest.txt)" = "$INDEX"
+          skopeo inspect --authfile "$auth" --raw "docker://$IMAGE:1.2.1" > publication-evidence/published-tag-index.json
+          printf '%s  %s\n' "${INDEX#sha256:}" publication-evidence/published-tag-index.json | sha256sum --check --strict
+          for digest in "$INDEX" "$PLATFORM"; do
+            name="${digest#sha256:}.json"
+            skopeo inspect --authfile "$auth" --raw "docker://$IMAGE@$digest" > "publication-evidence/$name"
+            printf '%s  %s\n' "${digest#sha256:}" "publication-evidence/$name" | sha256sum --check --strict
+          done
+          skopeo inspect --authfile "$auth" --raw --config "docker://$IMAGE@$PLATFORM" > publication-evidence/runtime-config.json
+          printf '%s  %s\n' "${CONFIG#sha256:}" publication-evidence/runtime-config.json | sha256sum --check --strict
+          printf 'Exact qualified image pushed: `%s@%s`. Public visibility and anonymous full-graph verification remain REQUIRED; this is not release/deployment acceptance.\n' "$IMAGE" "$INDEX" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
+        if: always()
+        with:
+          name: qualified-image-transfer
+          path: publication-evidence/
+          if-no-files-found: error
+          retention-days: 14
+  verify-public:
+    if: github.repository == 'TheStateOfWhere/zevyrn-password-generator' && github.ref == 'refs/tags/v1.2.1' && inputs.mode == 'verify-public'
+    runs-on: ubuntu-24.04
+    needs: guard
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Anonymous immutable-index pull and full graph verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          mkdir publication-evidence
+          skopeo --version > publication-evidence/skopeo-version.txt
+          # --no-creds / --src-no-creds prohibit use of any runner registry login.
+          skopeo inspect --no-creds --raw "docker://$IMAGE:1.2.1" > publication-evidence/public-tag-index.json
+          printf '%s  %s\n' "${INDEX#sha256:}" publication-evidence/public-tag-index.json | sha256sum --check --strict
+          skopeo copy --all --preserve-digests --src-no-creds --digestfile publication-evidence/anonymous-index-digest.txt "docker://$IMAGE@$INDEX" "oci:$RUNNER_TEMP/anonymous-zevyrn:qualified"
+          test "$(cat publication-evidence/anonymous-index-digest.txt)" = "$INDEX"
+          # Authenticate all fetched manifests, config, attestations and layer blobs.
+          for hash in fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e 75d744f9c4c10eeede58304cddff54530c08c9efccd0097ec24e5f074d7fa2f0 9b0d4db6534dbc82f96c0de4d71f318257716b936e17867f8595dd8fcc4e9dc8 29ac8db0bd7aaa9fc7f42286275adca7f48e84fe41ba60f1f084f02428d89b84 3fe0a757ca1a92de24d2351c588e603520456e237755e976f0eb3a879530b83c 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a dffeab4431af0afa5e2dd1d461c8efee89df74a3335ba030a764889d5e06667d; do
+            printf '%s  %s\n' "$hash" "$RUNNER_TEMP/anonymous-zevyrn/blobs/sha256/$hash" | sha256sum --check --strict
+          done
+          cp "$RUNNER_TEMP/anonymous-zevyrn/blobs/sha256/${CONFIG#sha256:}" publication-evidence/runtime-config.json
+          jq -e '.os == "linux" and .architecture == "amd64" and .config.User == "10001:10001" and .config.ExposedPorts == {"8080/tcp":{}} and .config.Entrypoint == ["nginx"] and .rootfs.diff_ids == ["sha256:d4e43179edd35bbb1e6b56b7c1028beb8c75bd11042819be97a6a43989f747d1"]' publication-evidence/runtime-config.json
+          printf 'Anonymous exact-image verification PASS: `%s@%s`, platform `%s`, config `%s`. No container was started or deployed.\n' "$IMAGE" "$INDEX" "$PLATFORM" "$CONFIG" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
+        if: always()
+        with:
+          name: qualified-image-anonymous-verification
+          path: publication-evidence/
+          if-no-files-found: error
+          retention-days: 14
