@@ -1,0 +1,170 @@
+# Preparation candidate only; not installed or dispatched.
+name: Zevyrn read-only GHCR diagnostic
+on:
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: zevyrn-ghcr-readonly-diagnostic
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: github.repository == 'TheStateOfWhere/zevyrn-password-generator' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      packages: read
+    steps:
+      - name: Inspect only Zevyrn 1.2.1 through the registry API
+        shell: bash
+        env:
+          GH_REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node <<'DIAGNOSTIC_NODE'
+          'use strict';
+          // Embedded verbatim in the one proposed workflow; no external code is fetched.
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const TARGET = 'https://ghcr.io/v2/thestateofwhere/zevyrn/manifests/1.2.1';
+          const SCOPE = 'repository:thestateofwhere/zevyrn:pull';
+          const TOKEN_URL = 'https://ghcr.io/token?service=ghcr.io&scope=' + encodeURIComponent(SCOPE);
+          const ACCEPT = 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json';
+          const report = {
+            target: 'ghcr.io/thestateofwhere/zevyrn:1.2.1',
+            runID: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            workflowSHA: process.env.GITHUB_SHA, workflowRef: process.env.GITHUB_WORKFLOW_REF,
+            requestedJobPermission: 'packages:read', requestedRegistryScope: SCOPE,
+            effectiveRegistryScope: 'not-established', publicationAuthority: 'not-tested',
+            classification: 'BLOCKED', stage: 'guard', observations: []
+          };
+          function stop(reason) { throw Object.assign(new Error(reason), { diagnosticCode: reason }); }
+          async function request(url, method, authorization) {
+            // Fixed allowlist and methods: even a malicious challenge cannot redirect credentials.
+            if (![TARGET, TOKEN_URL].includes(url) || !['HEAD', 'GET'].includes(method)) stop('REQUEST_NOT_ALLOWED');
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 15000);
+            try {
+              const response = await fetch(url, {
+                method, redirect: 'error', signal: controller.signal,
+                headers: { Accept: url === TOKEN_URL ? 'application/json' : ACCEPT,
+                  ...(authorization ? { Authorization: authorization } : {}) }
+              });
+              const chunks = []; let size = 0;
+              for await (const chunk of response.body || []) {
+                size += chunk.length;
+                if (size > 262144) { controller.abort(); stop('RESPONSE_TOO_LARGE'); }
+                chunks.push(chunk);
+              }
+              return { status: response.status, headers: response.headers, body: Buffer.concat(chunks) };
+            } catch (error) {
+              if (error.diagnosticCode) throw error;
+              stop(controller.signal.aborted ? 'REQUEST_TIMEOUT' : 'NETWORK_OR_REDIRECT_FAILURE');
+            } finally { clearTimeout(timer); }
+          }
+          function observe(operation, response) {
+            const rawDigest = response.headers.get('docker-content-digest');
+            const digest = /^sha256:[a-f0-9]{64}$/.test(rawDigest || '') ? rawDigest : null;
+            const rawType = response.headers.get('content-type')?.split(';')[0].trim();
+            const contentType = ACCEPT.split(', ').concat('application/json').includes(rawType) ? rawType : null;
+            const version = response.headers.get('docker-distribution-api-version') === 'registry/2.0' ? 'registry/2.0' : null;
+            const codes = [];
+            // Never persist arbitrary response messages/details, headers or token response bodies.
+            if (response.status >= 400 && operation !== 'token-exchange') {
+              try {
+                const parsed = JSON.parse(response.body.toString('utf8'));
+                for (const error of Array.isArray(parsed.errors) ? parsed.errors : []) {
+                  if (['UNAUTHORIZED', 'DENIED', 'MANIFEST_UNKNOWN', 'NAME_UNKNOWN', 'TOOMANYREQUESTS', 'UNKNOWN', 'UNSUPPORTED'].includes(error.code)) codes.push(error.code);
+                }
+              } catch { /* Status is retained; invalid/non-JSON error body confers no authority. */ }
+            }
+            const observation = { operation, status: response.status, digest, contentType, apiVersion: version, registryErrorCodes: codes };
+            report.observations.push(observation);
+            return observation;
+          }
+          async function main() {
+            try {
+              if (process.env.GITHUB_REPOSITORY !== 'TheStateOfWhere/zevyrn-password-generator' ||
+                  process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch' || process.env.GITHUB_REF !== 'refs/heads/main' ||
+                  !process.env.GH_REGISTRY_TOKEN || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,99})(?:\[bot\])?$/.test(process.env.GITHUB_ACTOR || '')) stop('INVALID_EXECUTION_CONTEXT');
+              report.stage = 'challenge';
+              const challenge = await request(TARGET, 'HEAD');
+              observe('unauthenticated-manifest-head', challenge);
+              if (challenge.status === 200) {
+                report.classification = 'TAG_EXISTS_ANONYMOUSLY';
+                report.tokenExchange = 'not-needed-no-challenge';
+                report.sufficientFor = 'tag-existence-only-not-publication-authority';
+                return;
+              }
+              if (challenge.status !== 401) stop('UNEXPECTED_CHALLENGE_STATUS');
+              // Accept only the documented GHCR target challenge; do not follow arbitrary realms.
+              const header = challenge.headers.get('www-authenticate') || '';
+              if (!/^Bearer\s+/i.test(header)) stop('INVALID_BEARER_CHALLENGE');
+              const attrs = {}; let rest = header.replace(/^Bearer\s+/i, '');
+              while (rest) {
+                const match = /^([a-z]+)="([^"\r\n\\]*)"(?:\s*,\s*|$)/i.exec(rest);
+                if (!match || Object.hasOwn(attrs, match[1].toLowerCase())) stop('INVALID_BEARER_CHALLENGE');
+                attrs[match[1].toLowerCase()] = match[2]; rest = rest.slice(match[0].length);
+              }
+              if (Object.keys(attrs).some(key => !['realm', 'service', 'scope'].includes(key)) ||
+                  attrs.realm !== 'https://ghcr.io/token' || attrs.service !== 'ghcr.io' ||
+                  (attrs.scope !== undefined && attrs.scope !== SCOPE)) stop('UNEXPECTED_CHALLENGE_AUTHORITY');
+              report.challenge = { scheme: 'Bearer', ...attrs };
+              report.stage = 'token-exchange';
+              const basic = Buffer.from(process.env.GITHUB_ACTOR + ':' + process.env.GH_REGISTRY_TOKEN).toString('base64');
+              const exchanged = await request(TOKEN_URL, 'GET', 'Basic ' + basic);
+              observe('token-exchange', exchanged);
+              report.tokenExchange = exchanged.status === 200 ? 'http-success-pending-token-validation' : 'failed';
+              if (exchanged.status !== 200) stop(exchanged.status === 401 || exchanged.status === 403 ? 'TOKEN_AUTHENTICATION_OR_AUTHORIZATION_FAILED' : 'TOKEN_EXCHANGE_FAILED');
+              let payload;
+              try { payload = JSON.parse(exchanged.body.toString('utf8')); } catch { stop('INVALID_TOKEN_RESPONSE'); }
+              const bearer = payload?.token || payload?.access_token;
+              if (typeof bearer !== 'string' || !/^[A-Za-z0-9._~+\/-]+={0,2}$/.test(bearer) || bearer.length > 65536 ||
+                  (payload.token && payload.access_token && payload.token !== payload.access_token)) stop('INVALID_TOKEN_RESPONSE');
+              // No token is printed, decoded, written to disk, or included in an exception.
+              report.tokenExchange = 'succeeded-effective-scope-unproven';
+              report.stage = 'authenticated-manifest-head';
+              const head = await request(TARGET, 'HEAD', 'Bearer ' + bearer);
+              observe('authenticated-manifest-head', head);
+              if (![200, 404].includes(head.status)) stop(head.status === 401 || head.status === 403 ? 'MANIFEST_AUTHENTICATION_OR_AUTHORIZATION_FAILED' : 'UNEXPECTED_MANIFEST_HEAD_STATUS');
+              report.stage = 'authenticated-manifest-get';
+              const get = await request(TARGET, 'GET', 'Bearer ' + bearer);
+              const observation = observe('authenticated-manifest-get', get);
+              if (head.status !== get.status) stop('CONTRADICTORY_MANIFEST_RESPONSES');
+              if (get.status === 404) {
+                // Token issuance may grant an empty intersection. A 404 alone is not a grant.
+                report.classification = 'NOT_FOUND_UNDER_TESTED_IDENTITY_SCOPE_UNPROVEN';
+                report.sufficientFor = 'neither-confirmed-absence-nor-publication-eligibility';
+                stop('AMBIGUOUS_NOT_FOUND');
+              }
+              let manifest;
+              try { manifest = JSON.parse(get.body.toString('utf8')); } catch { stop('INVALID_MANIFEST_RESPONSE'); }
+              if (manifest?.schemaVersion !== 2 || !ACCEPT.split(', ').includes(manifest.mediaType) ||
+                  !observation.digest || observation.digest !== 'sha256:' + crypto.createHash('sha256').update(get.body).digest('hex') ||
+                  observation.contentType !== manifest.mediaType) stop('INVALID_MANIFEST_RESPONSE');
+              const headDigest = head.headers.get('docker-content-digest');
+              if (headDigest && headDigest !== observation.digest) stop('CONTRADICTORY_MANIFEST_DIGESTS');
+              report.classification = 'TAG_EXISTS_UNDER_TESTED_IDENTITY';
+              report.effectiveRegistryScope = 'target-manifest-read-observed-only';
+              report.sufficientFor = 'tag-existence-only-not-publication-authority';
+            } catch (error) {
+              report.failure = error.diagnosticCode || 'INTERNAL_DIAGNOSTIC_FAILURE';
+              process.exitCode = 1;
+            } finally {
+              // A diagnostic write failure also fails the job; raw exception data is never logged.
+              try {
+                fs.mkdirSync('registry-diagnostic-evidence', { recursive: true });
+                fs.writeFileSync('registry-diagnostic-evidence/result.json', JSON.stringify(report, null, 2) + '\n');
+                console.log(JSON.stringify(report));
+              } catch { process.exitCode = 1; console.error('DIAGNOSTIC_EVIDENCE_WRITE_FAILED'); }
+            }
+          }
+          main();
+          DIAGNOSTIC_NODE
+      - name: Preserve sanitized diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ghcr-readonly-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: registry-diagnostic-evidence/
+          if-no-files-found: error
+          retention-days: 14
