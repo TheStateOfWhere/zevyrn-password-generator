@@ -125,6 +125,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir publication-evidence
+          # Preserve bounded status, response and request identity before eligibility checks.
+          node <<'NODE'
+          // Read-only diagnostic probe; not package authority or namespace eligibility.
+          const {execFileSync}=require('node:child_process');
+          const {writeFileSync}=require('node:fs');
+          const endpoint='users/TheStateOfWhere/packages?package_type=container&per_page=100';
+          const args=['api','--hostname','api.github.com','--method','GET','--include','-H','Accept: application/vnd.github+json','-H','X-GitHub-Api-Version: 2022-11-28',endpoint];
+          let raw='',exit=0,diagnostic='';
+          try { raw=execFileSync('gh',args,{encoding:'utf8',timeout:60000,maxBuffer:4*1024*1024,stdio:['ignore','pipe','pipe']}); }
+          catch(e) { raw=String(e.stdout||'');exit=Number.isInteger(e.status)?e.status:1;diagnostic=String(e.stderr||e.code||'Transport failure').slice(0,4096); }
+          const match=/^HTTP\/\S+\s+(\d{3})[^\r\n]*\r?\n([\s\S]*?)\r?\n\r?\n([\s\S]*)$/.exec(raw);
+          const status=match?Number(match[1]):null;
+          const header=name=>match?.[2].split(/\r?\n/).find(line=>line.toLowerCase().startsWith(name+':'))?.split(':').slice(1).join(':').trim()||null;
+          let body=null;try {body=match?JSON.parse(match[3]):null;}catch{}
+          const classification=({200:'accessible-response-only',400:'request-rejected-cause-unresolved',401:'authentication-failed',403:'access-denied-or-policy-restriction',404:'not-found-or-not-visible'})[status]||'unexpected-or-transport-failure';
+          const record={method:'GET',endpoint,apiVersion:'2022-11-28',status,processExit:exit,requestID:header('x-github-request-id'),selectedAPIVersion:header('x-github-api-version-selected'),classification,packageExistence:'unresolved',publicationAuthority:'unresolved',diagnostic};
+          if(status!==200&&body&&typeof body==='object'&&!Array.isArray(body)) record.errorResponse=body;
+          writeFileSync('publication-evidence/package-api-diagnostics.json',JSON.stringify(record,null,2)+'\n');
+          if(exit!==0||status!==200||!Array.isArray(body)) throw new Error('Package metadata probe failed closed; see package-api-diagnostics.json');
+          NODE
           # A failed package-list request is never interpreted as package absence.
           gh api 'users/TheStateOfWhere/packages?package_type=container&per_page=100' --paginate --slurp > "$RUNNER_TEMP/packages.json"
           # Only target metadata enters evidence; unrelated private package names do not.
