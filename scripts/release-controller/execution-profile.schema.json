@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "authorizedPhases",
+    "executionRoot",
+    "bindings",
+    "records"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "status": {
+      "const": "EXTERNALLY_APPROVED"
+    },
+    "authorizedPhases": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "verify",
+          "readiness",
+          "settlement",
+          "native-linux-execution",
+          "read-only-host-check"
+        ]
+      }
+    },
+    "executionRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bindings": {
+      "type": "object"
+    },
+    "records": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "then": {
+        "properties": {
+          "bindings": {
+            "required": [
+              "runID",
+              "sourceCommit",
+              "sourceManifestSHA256",
+              "parentManifestSHA256",
+              "images",
+              "runtimePackages",
+              "hostname",
+              "machineID",
+              "daemonID",
+              "account",
+              "uid",
+              "endpoint"
+            ]
+          },
+          "records": {
+            "required": [
+              "baseline",
+              "executionBoundary",
+              "transport"
+            ]
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "authorizedPhases": {
+            "contains": {
+              "enum": [
+                "readiness",
+                "settlement",
+                "native-linux-execution",
+                "read-only-host-check"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "then": {
+        "properties": {
+          "records": {
+            "required": [
+              "settlement",
+              "securityRefresh",
+              "supersession"
+            ]
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "authorizedPhases": {
+            "contains": {
+              "const": "settlement"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

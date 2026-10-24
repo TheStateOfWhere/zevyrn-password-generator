@@ -1,0 +1,3 @@
+# Controller identities bind raw bytes, including reviewed CRLF and mixed text.
+# Preserve those bytes and retain normal whitespace checks with CR-at-EOL support.
+* -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

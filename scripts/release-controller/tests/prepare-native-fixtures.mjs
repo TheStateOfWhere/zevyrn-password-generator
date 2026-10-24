@@ -1,0 +1,11 @@
+import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {spawnSync} from 'node:child_process';import {nativeClipboard} from '../clipboard-acceptance.mjs';
+const here=path.dirname(fileURLToPath(import.meta.url)),config=JSON.parse(fs.readFileSync(path.join(here,'clipboard-authority.PROPOSED.json'),'utf8').replace(/^\uFEFF/,''));
+const session=nativeClipboard(config,'session'),seed=nativeClipboard(config,'seed','ZEVYRN-CLIPBOARD-BOUNDARY-0123456789abcdef0123456789abcdef');
+fs.writeFileSync(path.join(here,'native-probe-final.json'),JSON.stringify({session,seed},null,2),{flag:'wx'});
+const r=spawnSync(config.powershell.path,['-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',path.join(here,'test-native-contention.ps1'),'-Helper',config.nativeHelper.path,'-HelperSHA256',config.nativeHelper.sha256,'-ExpectedSID',config.session.sid],{encoding:'utf8',timeout:30000,maxBuffer:262144,windowsHide:true});
+fs.writeFileSync(path.join(here,'native-contention-final.stderr.txt'),r.stderr||'',{flag:'wx'});
+fs.writeFileSync(path.join(here,'native-contention-final.stdout.txt'),r.stdout||'',{flag:'wx'});
+if(r.error||r.status!==0||r.signal||r.stderr)throw Error('NATIVE_FIXTURE_PROCESS_FAILED');
+const value=JSON.parse(r.stdout.replace(/^\uFEFF/,''));if(value.helperSHA256!==config.nativeHelper.sha256||!value.cleanupSucceeded||!value.fixtureThreadsSettled)throw Error('NATIVE_FIXTURE_BINDING_OR_CLEANUP');
+fs.writeFileSync(path.join(here,'native-contention-results-final.json'),JSON.stringify(value,null,2),{flag:'wx'});
+console.log('Fresh native fixtures captured; no qualification executed');

@@ -1,0 +1,16 @@
+{
+  "runtime": {
+    "secrets": 0,
+    "high": 0,
+    "critical": 0
+  },
+  "builder": {
+    "defaultHigh": "BLOCK",
+    "secrets": 0,
+    "approvedReceipts": [],
+    "critical": 0
+  },
+  "databaseFreshnessSeconds": 86400,
+  "buildScratchBytes": 8589934592,
+  "schemaVersion": 1
+}
