@@ -376,7 +376,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Diagnose pinned draft access without changing release identity
         shell: bash
