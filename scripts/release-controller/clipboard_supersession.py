@@ -213,7 +213,7 @@ def assess(claim_path):
     if 'historicalBrowserTools' in ctx.profile()['records']:
         _HISTORICAL_BROWSER_TOOLS=historical_browser_tools(authority_document('historicalBrowserTools'),descriptor['sha256'],a['completion']['anchors'])
     document = decode(no_links(claim_path).read_bytes())
-    _claim(a, document)
+    claim = _claim(a, document)
     for anchor in ('activation', 'controller', 'originalHarness'):
         authenticated_bytes(a[anchor]['path'], a[anchor]['sha256'])
     activation = read_json(a['activation']['path'], a['activation']['sha256'])
@@ -258,10 +258,10 @@ def assess(claim_path):
                decode(records['retest-process-exit.json']), decode(records[prefix + 'harness-test-results.json']),
                dt.datetime.now(dt.timezone.utc))
     module = Path(__file__).with_name('browser_completion.py')
-    data = authenticated_bytes(module, '5349a0f740086379345638d0d9f53ed3ce01824035c390f0ffa9384d19bfc6a3')
+    data = authenticated_bytes(module, 'bd5a29cd41848ce89a7add5e62394ca105e96fa2f3e4fca1b2295a2e88b32877')
     scope = {'__file__': str(module), '__name__': 'authenticated_browser_completion'}
     exec(compile(data, str(module), 'exec'), scope)
-    completion = scope['authenticate_and_evaluate'](globals(), a, dt.datetime.now(dt.timezone.utc))
+    completion = scope['authenticate_and_evaluate'](globals(), a, dt.datetime.now(dt.timezone.utc), claim)
     return {'contractID': a['contractID'], 'status': 'PROPOSED_BROWSER_EVIDENCE_ELIGIBLE',
             'active': False, 'originalResult': 'FAILED_PRESERVED', 'gate': a['gate'],
             'failureSHA256': a['boundOriginal']['browser-testing-failed.json'],

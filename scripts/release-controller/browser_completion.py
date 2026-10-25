@@ -5,6 +5,7 @@ proposal authority. Semantic checks are separate to permit defensive unit tests.
 """
 import datetime as dt
 import hashlib
+import re
 from pathlib import Path
 
 
@@ -154,15 +155,31 @@ def evaluate(v, a, browser, cleanup, now):
             'cleanupExecutionID': spec['cleanupExecutionID'], 'freshnessAnchorsReset': False}
 
 
-def authenticate_and_evaluate(v, a, now):
+def authenticate_and_evaluate(v, a, now, claim):
     """All runtime/reader/controller files are authenticated before any code load."""
     spec = a['completion']
+    phases = {'preflight','scan','scan-acceptance','reuse','audit','acceptance',
+              'runtime-creation','runtime-collection','runtime-removal',
+              'browser-creation','browser-collection','browser-removal'}
+    records = spec['controllerRecords']
+    v['require'](type(records) is dict and set(records) == phases,
+                 'CONTROLLER_RECORD_COVERAGE')
+    for phase, pins in records.items():
+        v['require'](type(pins) is dict and set(pins) ==
+                     {phase+'-attempt.json',phase+'-completed.json'} and
+                     all(type(h) is str and re.fullmatch('[0-9a-f]{64}', h)
+                         for h in pins.values()), 'CONTROLLER_RECORD_IDENTITY')
     bundles = {}
     for key in ('browser', 'cleanup'):
         s = spec[key]
         manifest = v['read_json'](Path(s['root']) / 'final-evidence-inventory.json', s['inventorySHA256'])
         rows = manifest.get('files', manifest.get('records'))
         bundles[key] = v['inventory'](s['root'], {'files': rows}, s['records'])
+    for key, name, field in (
+            ('browser', 'EVIDENCE-EXECUTION-RECEIPT.json', 'consoleReceiptSHA256'),
+            ('cleanup', 'CLEANUP-COMPLETION-RECEIPT.json', 'cleanupReceiptSHA256')):
+        v['require'](hashlib.sha256(bundles[key][name]).hexdigest() == claim[field],
+                     'COMPLETION_RECEIPT_CLAIM_BINDING')
     for anchor in spec['anchors']:
         v['authenticated_bytes'](anchor['path'], anchor['sha256'])
     result = evaluate(v, a, bundles['browser'], bundles['cleanup'], now)

@@ -7,7 +7,7 @@ completion receipt nor authorizes final qualification or changes active selectio
 import hashlib
 from pathlib import Path
 
-MODULE_SHA256 = 'd94f734a856e730c316bf1e9765cdc9eaf0d4e5dea07a5c98a3661ce996963bb'
+MODULE_SHA256 = 'e6c4a8393863dc11826d5a81af41af429ad8f074be47856b5642c37125aad044'
 
 
 def _validator():

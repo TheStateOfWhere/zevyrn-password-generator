@@ -50,7 +50,7 @@ def validate(result,nonce,now=None):
       'Unapproved Linux host/daemon/endpoint')
     require(result['account']=='user' and result['uid']==1000 and result['platform']=='linux','Unapproved Linux account/platform')
     require(result['workflowSHA256']==active().code_hash('workflow.py') and
-      result['readOnly'] is True and result['DockerMutations']==0,'Linux check authority/scope')
+      result['readOnly'] is True and type(result['DockerMutations']) is int and result['DockerMutations']==0,'Linux check authority/scope')
     t=dt.datetime.fromisoformat(result['checkedUTC'].replace('Z','+00:00'))
     require(t.tzinfo is not None and -5 <= (now-t).total_seconds() <=180,'Stale Linux check')
     require(len(result['images'])==2 and {r['Id'] for r in result['images']}==set(identities()) and
@@ -61,14 +61,26 @@ def validate(result,nonce,now=None):
       re.fullmatch('[0-9a-f]{64}',app['Id']) and app['name']=='/keysmith-keysmith-1' and
       app['status']=='running' and app['health']=='healthy','Linux application dependency')
     require(len(result['networks'])==3 and {r['Name'] for r in result['networks']}=={'proxy','bridge','none'},'Linux network dependencies')
-    require(result['capacity']['cpus']>=2 and result['capacity']['availableMemory']>=2*1024**3 and
+    require(set(result['capacity'])=={'cpus','availableMemory','requiredScratchBytes','workFree','dockerFree'} and
+      all(type(v) is int for v in result['capacity'].values()) and
+      result['capacity']['cpus']>=2 and result['capacity']['availableMemory']>=2*1024**3 and
       result['capacity']['requiredScratchBytes']==0 and min(result['capacity']['workFree'],result['capacity']['dockerFree'])>=0,'Linux capacity')
     allowed=[['hostname'],D+['info','--format','{{.ID}}'],D+['info','--format','{{.DockerRootDir}}'],
       D+['context','inspect','default','--format','{{.Endpoints.docker.Host}}'],D+['image','inspect',*identities()],
       D+['ps','-aq','--no-trunc','--filter','name=^/keysmith-keysmith-1$'],
       D+['network','inspect','proxy','bridge','none'],D+['inspect',app['Id']]]
-    require(result['commands'] and all(r['exitCode']==0 and r['arguments'] in allowed for r in result['commands']),
+    interpreter=result['interpreter']
+    require(type(interpreter) is dict and set(interpreter)=={'path','sha256'} and
+      type(interpreter['path']) is str and pathlib.PurePosixPath(interpreter['path']).is_absolute() and
+      '\\' not in interpreter['path'] and '..' not in pathlib.PurePosixPath(interpreter['path']).parts and
+      type(interpreter['sha256']) is str and re.fullmatch('[0-9a-f]{64}',interpreter['sha256']),
+      'Linux interpreter diagnostics')
+    require(type(result['commands']) is list and all(type(r) is dict and set(r)=={'arguments','exitCode'} and
+      type(r['exitCode']) is int and r['exitCode']==0 and r['arguments'] in allowed for r in result['commands']),
       'Linux check command failure/scope')
+    require(len(result['commands'])==len(allowed) and
+      {tuple(r['arguments']) for r in result['commands']}=={tuple(a) for a in allowed},
+      'Linux check command coverage')
     return result
 
 class Transport:
