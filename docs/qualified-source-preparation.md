@@ -1,5 +1,12 @@
 # Qualified source-byte preparation
 
+This document concerns reproduction of the **historical qualified artifact**.
+Ordinary development and Docker source builds use exact canonical Git LF
+metadata and do not use this preparer. New development bytes do not acquire
+historical qualification merely by passing the current compiler integrity gate.
+The historical archives, controller authority and preparation approvals remain
+unchanged; this development correction does not activate a new controller profile.
+
 Git's LF blobs identify the repository source. The authenticated v1.2.1
 qualification used CRLF bytes for the 17 files below. Logical newline equivalence
 does not establish byte identity. A Git archive alone is therefore insufficient

@@ -1,16 +1,22 @@
-// Frozen official compiler artifacts; no network, subprocess or compiler fallback.
+// Canonical Git LF project metadata; exact official compiler artifact bytes.
+// No source rewriting, network, subprocess or compiler fallback.
 import {readFile,readdir,lstat,realpath} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {resolve,relative,sep} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
 const root=fileURLToPath(new URL('../',import.meta.url));
-const catalogSHA256='ca9993e94e4f109d59130f29e140434817214eb9549eb44b8beedd65dcd99acd';
+const catalogSHA256='491484c5789eebbefd8e51c52bb30b4c4ea0656b17929a66a3a8b51b0ac5c7d8';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+async function metadataBytes(path) {
+  const file=resolve(root,path),stat=await lstat(file);
+  assert(stat.isFile()&&!stat.isSymbolicLink(),'Expected regular project metadata: '+path);
+  return readFile(file);
+}
 export async function compilerPolicy() {
-  const bytes=await readFile(new URL('./compiler-integrity.json',import.meta.url));
+  const bytes=await metadataBytes('scripts/compiler-integrity.json');
   assert.equal(hash(bytes),catalogSHA256,'Compiler catalog integrity');
-  const catalog=JSON.parse(bytes),pkgBytes=await readFile(resolve(root,'package.json')),lockBytes=await readFile(resolve(root,'package-lock.json'));
+  const catalog=JSON.parse(bytes),pkgBytes=await metadataBytes('package.json'),lockBytes=await metadataBytes('package-lock.json');
   assert.equal(hash(pkgBytes),catalog.packageSHA256,'Approved project compiler metadata');
   assert.equal(hash(lockBytes),catalog.lockSHA256,'Approved dependency lock');
   const pkg=JSON.parse(pkgBytes),lock=JSON.parse(lockBytes);

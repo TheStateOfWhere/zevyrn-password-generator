@@ -7,6 +7,24 @@ rename and retained configuration identifiers.
 
 ## Prebuilt image (recommended)
 
+### Platforms and prerequisites
+
+- Supported container target: **Linux/amd64** on x86-64 Linux or Docker Desktop
+  in Linux-container mode. Native Windows containers are not supported.
+- ARM hosts require amd64 emulation; ARM/emulated execution is not validated.
+- Use maintained Docker Engine 28+ (or Docker Desktop), Compose supporting
+  `--wait` and `--wait-timeout`, and `curl` for the HTTP checks. Source builds
+  also require Git and Buildx. Host Node, npm and Python are unnecessary.
+- Examples use a POSIX shell. In PowerShell use `curl.exe` for HTTP commands;
+  edit `.env` directly rather than using POSIX shell variable assignments.
+- With a remote Docker context, loopback ports belong to the Docker host,
+  not the computer running the CLI.
+
+Select `compose.ghcr.yaml` for the prebuilt image, `compose.zevyrn.yaml` for a
+source build, or one complete Zevyrn Traefik/Caddy file for HTTPS. Do not combine
+these files. Existing installations keep their original files; the default
+`compose.yaml` deliberately uses legacy names.
+
 Planned public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.1`**, Linux/amd64.
 **Not yet published or registry-verified during release preparation.** Use these
 instructions after the release image and its registry digest are published.
@@ -103,6 +121,18 @@ shown in [README.md](README.md); `compose.zevyrn*.yaml` uses the local
 npm and Alpine access for the first build. A new build does not inherit the
 retained release image's qualification. The standalone default needs no
 environment file. For remote browsers, choose an HTTPS alternative below.
+
+Select a reference containing the portable-build correction; historical tags
+remain unchanged. The exact LF bytes of `package.json`, `package-lock.json` and
+the compiler catalog are authenticated, as are all installed compiler files.
+`.gitattributes` enforces LF on Windows and Linux. No Git executable is needed
+inside the builder, no files are rewritten by verification, and historical
+qualification archives are not build prerequisites. Manually converted CRLF
+or altered files fail closed.
+
+This contract is distinct from reproducing the old qualified CRLF artifact.
+Development tests do not qualify a newly built image; the existing builder
+security blocker remains unresolved.
 
 ## Choose a hostname and client trust
 
@@ -244,6 +274,56 @@ certificate-loading errors, hostname/DNS and CA trust for TLS failures, and app
 health/network membership for 502 responses. Do not disable read-only mode or
 run the app as root to conceal an error. No real generated passwords belong in
 logs, screenshots or support issues.
+
+### Diagnostic checklist
+
+Use your actual project, file and service names. For the prebuilt example:
+
+```sh
+docker compose -p zevyrn -f compose.ghcr.yaml config
+docker compose -p zevyrn -f compose.ghcr.yaml ps --all
+docker compose -p zevyrn -f compose.ghcr.yaml logs --tail 100 zevyrn
+# Obtain the application container ID (including an exited container):
+docker compose -p zevyrn -f compose.ghcr.yaml ps --all --quiet zevyrn
+# Replace CONTAINER_ID with that output; do not paste the placeholder literally:
+docker inspect --format '{{json .State}}' CONTAINER_ID
+curl --fail http://127.0.0.1:18080/healthz
+```
+
+- **Image cannot be pulled:** confirm publication/public visibility, exact name,
+  version and architecture. The planned v1.2.1 image is not yet public-verified.
+- **Port already allocated:** choose another `ZEVYRN_PORT`, run `config` again,
+  and use that port in your browser/health request. Do not stop unrelated apps.
+- **Exited/restarting:** inspect the exit code, `OOMKilled`, error and bounded
+  logs. Report repeated failures; do not remove isolation controls to hide them.
+- **Unhealthy:** `.State.Health` includes recent probe output. The health check
+  uses container port 8080; changing the host port does not change it.
+- **Empty logs:** normal requests are not access-logged. Nginx errors go to
+  stderr; empty logs alone do not establish a failure.
+- **Healthy, but page will not load:** `/healthz` checks Nginx, not JavaScript
+  initialization or every asset. Reload, confirm the configured URL, and check
+  Firefox/other browser Developer Tools Network and Console for missing or
+  rejected local resources. Record filenames/statuses, never password values.
+- **Copy fails:** use localhost or normally trusted HTTPS and check the visible
+  browser guidance. Do not disable browser protections or certificate checks.
+- **Build integrity failure:** use a clean reviewed checkout with Git LF bytes;
+  do not rewrite hashes, normalize installed compiler packages or skip tests.
+  If an exact pinned Alpine package is unavailable, report it rather than
+  substituting a floating version.
+
+`unless-stopped` restarts an exited process; it does not itself restart a
+container merely because it becomes unhealthy. Diagnose the failed probe first.
+
+### Reporting an application problem
+
+Open an issue in the canonical repository with the app version/source commit,
+image tag and digest, OS/CPU architecture, Docker/Compose versions, selected
+Compose file, minimal reproduction, expected/actual behavior and sanitized
+bounded logs or health errors. Include browser/version for UI or copying issues.
+Review `config` and inspection output before sharing it: redact secrets, private
+paths/hostnames and credentials. Do not attach `.env`, TLS keys, generated
+passwords or raw clipboard contents. For vulnerabilities use the private route
+in [SECURITY.md](SECURITY.md), not a public issue.
 
 ## Updates
 

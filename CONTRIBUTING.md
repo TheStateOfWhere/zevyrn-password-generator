@@ -1,6 +1,19 @@
 # Contributing
 
-Use Node.js 22 or newer and npm for local development:
+Use Node.js 22 or newer and npm for local development. Keep the checkout's
+Git LF bytes as selected by `.gitattributes`; compiler verification authenticates
+project metadata and exact installed compiler files without rewriting either.
+Do not convert project metadata to historical qualified CRLF bytes. Historical
+artifact reproduction is a separate process, not a normal development prerequisite.
+
+Before dependency installation, the source-checkout checks can run with Node alone:
+
+```sh
+node --input-type=module -e "import {compilerPolicy} from './scripts/verify-compiler.mjs'; await compilerPolicy();"
+node --test tests/source-build-portability.mjs
+```
+
+Then use the existing locked dependencies:
 
 ```sh
 npm ci

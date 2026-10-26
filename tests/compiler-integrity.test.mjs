@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {cp,mkdtemp,mkdir,readFile,writeFile,rm,rmdir,lstat,rename} from 'node:fs/promises';
+import {cp,mkdtemp,mkdir,readFile,writeFile,rm,rmdir,lstat,rename,symlink} from 'node:fs/promises';
 import {join,resolve,sep} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
@@ -36,4 +36,57 @@ test('compiler integrity fails closed on artifact, manifest, alias, catalog and 
     await rm(root,{recursive:true,force:true});
     await assert.rejects(lstat(root),{code:'ENOENT'},'entire scoped integrity fixture removed');
   }
+});
+
+test('project metadata uses exact LF checkout bytes and rejects CRLF, mixed endings and otherwise valid JSON changes',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'zevyrn-checkout-metadata-'));
+  const files=['scripts/compiler-integrity.json','package.json','package-lock.json'];
+  try {
+    await mkdir(join(root,'scripts'));
+    for(const path of [...files,'scripts/verify-compiler.mjs'])await cp(join(source,path),join(root,path));
+    // Exercise the same metadata-only path as CI, without installed dependencies.
+    const run=()=>spawnSync(process.execPath,['--input-type=module','-e',
+      "import {compilerPolicy} from './scripts/verify-compiler.mjs'; await compilerPolicy();"],{cwd:root,encoding:'utf8'});
+    assert.equal(run().status,0);
+    for(const path of files) {
+      const original=await readFile(join(root,path));
+      assert.equal(original.includes(13),false,'Canonical checkout must contain LF bytes: '+path);
+      const text=original.toString('utf8');
+      for(const altered of [text.replaceAll('\n','\r\n'),text.replace('\n','\r\n'),text+'\n']) {
+        await writeFile(join(root,path),altered);
+        assert.notEqual(run().status,0,'Changed representation must fail: '+path);
+      }
+      // Still valid JSON, but a changed identity: comparison is not semantic-only.
+      const changed=JSON.parse(text);changed.unapprovedMetadata=true;
+      await writeFile(join(root,path),JSON.stringify(changed,null,2)+'\n');
+      assert.notEqual(run().status,0,'Changed JSON must fail: '+path);
+      await writeFile(join(root,path),original);
+      assert.equal(run().status,0,'Restored exact LF bytes must pass');
+      await rename(join(root,path),join(root,path)+'.missing');
+      assert.notEqual(run().status,0,'Missing metadata must fail: '+path);
+      await rename(join(root,path)+'.missing',join(root,path));
+    }
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test('metadata symlinks cannot substitute exact approved bytes',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'zevyrn-metadata-link-'));
+  const files=['scripts/compiler-integrity.json','package.json','package-lock.json'];
+  try {
+    await mkdir(join(root,'scripts'));
+    for(const path of [...files,'scripts/verify-compiler.mjs'])await cp(join(source,path),join(root,path));
+    for(const path of files) {
+      const file=join(root,path),saved=file+'.saved';await rename(file,saved);
+      try { await symlink(saved,file,'file'); }
+      catch(error) {
+        if(process.platform==='win32'&&error.code==='EPERM') {t.skip('Windows account cannot create file symlinks');return;}
+        throw error;
+      }
+      const run=spawnSync(process.execPath,['--input-type=module','-e',
+        "import {compilerPolicy} from './scripts/verify-compiler.mjs'; await compilerPolicy();"],{cwd:root,encoding:'utf8'});
+      assert.notEqual(run.status,0,'Symlink must fail: '+path);
+      assert.match(run.stderr,/Expected regular project metadata/);
+      await rm(file);await rename(saved,file);
+    }
+  } finally {await rm(root,{recursive:true,force:true});}
 });

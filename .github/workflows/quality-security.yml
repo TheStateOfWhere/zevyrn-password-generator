@@ -27,35 +27,10 @@ jobs:
         with:
           node-version: '24.21.0'
           cache: npm
-      - name: Authenticate exact qualified compiler metadata representation
-        shell: bash
+      - name: Verify canonical Git compiler metadata
         run: |
-          node --input-type=module <<'NODE'
-          // Only these three already-reviewed LF-to-CRLF provenance mappings are allowed.
-          import {readFileSync,writeFileSync,lstatSync} from 'node:fs';
-          import {createHash} from 'node:crypto';
-          import assert from 'node:assert/strict';
-          const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-          const approved = [
-            ['scripts/compiler-integrity.json','ab4ddf40c4b2e8e98269954716851847892e90dcea41ecc6448725ddece08edc','ca9993e94e4f109d59130f29e140434817214eb9549eb44b8beedd65dcd99acd'],
-            ['package.json','e9347478744448830b8e287b3257add9e82fff87848cc7323174f6090eca6893','0dfa3950c7fe49c84bc882626ac108f10226aae3b4f10510ade8c6efc0d43324'],
-            ['package-lock.json','b62c78761576aacd7001253c19e062ee3f5c530c0d778fbffe8c3fd1987873e2','19aefd8fbb41d3a5753f78b5acc5e133a5804a32e30999d64e9a551a4fce374c']
-          ];
-          const materialized = approved.map(([file,gitSHA,qualifiedSHA]) => {
-            const stat = lstatSync(file);
-            assert(stat.isFile() && !stat.isSymbolicLink(), 'Expected regular source file: '+file);
-            const bytes = readFileSync(file);
-            assert.equal(sha256(bytes),gitSHA,'Approved Git source identity: '+file);
-            const qualified = Buffer.from(bytes.toString('utf8').replace(/\n/g,'\r\n'),'utf8');
-            assert.equal(sha256(qualified),qualifiedSHA,'Qualified source representation: '+file);
-            return {file,qualified,qualifiedSHA};
-          });
-          for (const {file,qualified,qualifiedSHA} of materialized) {
-            writeFileSync(file,qualified);
-            assert.equal(sha256(readFileSync(file)),qualifiedSHA,'Materialized source identity: '+file);
-          }
-          console.log('Exact qualified compiler metadata representation authenticated.');
-          NODE
+          node --input-type=module -e "import {compilerPolicy} from './scripts/verify-compiler.mjs'; await compilerPolicy();"
+          node --test tests/source-build-portability.mjs
       - name: Verified Compose configuration loader
         shell: bash
         run: |
@@ -149,35 +124,10 @@ jobs:
         with:
           node-version: '24.21.0'
           cache: npm
-      - name: Authenticate exact qualified compiler metadata representation
-        shell: bash
+      - name: Verify canonical Git compiler metadata
         run: |
-          node --input-type=module <<'NODE'
-          // Only these three already-reviewed LF-to-CRLF provenance mappings are allowed.
-          import {readFileSync,writeFileSync,lstatSync} from 'node:fs';
-          import {createHash} from 'node:crypto';
-          import assert from 'node:assert/strict';
-          const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-          const approved = [
-            ['scripts/compiler-integrity.json','ab4ddf40c4b2e8e98269954716851847892e90dcea41ecc6448725ddece08edc','ca9993e94e4f109d59130f29e140434817214eb9549eb44b8beedd65dcd99acd'],
-            ['package.json','e9347478744448830b8e287b3257add9e82fff87848cc7323174f6090eca6893','0dfa3950c7fe49c84bc882626ac108f10226aae3b4f10510ade8c6efc0d43324'],
-            ['package-lock.json','b62c78761576aacd7001253c19e062ee3f5c530c0d778fbffe8c3fd1987873e2','19aefd8fbb41d3a5753f78b5acc5e133a5804a32e30999d64e9a551a4fce374c']
-          ];
-          const materialized = approved.map(([file,gitSHA,qualifiedSHA]) => {
-            const stat = lstatSync(file);
-            assert(stat.isFile() && !stat.isSymbolicLink(), 'Expected regular source file: '+file);
-            const bytes = readFileSync(file);
-            assert.equal(sha256(bytes),gitSHA,'Approved Git source identity: '+file);
-            const qualified = Buffer.from(bytes.toString('utf8').replace(/\n/g,'\r\n'),'utf8');
-            assert.equal(sha256(qualified),qualifiedSHA,'Qualified source representation: '+file);
-            return {file,qualified,qualifiedSHA};
-          });
-          for (const {file,qualified,qualifiedSHA} of materialized) {
-            writeFileSync(file,qualified);
-            assert.equal(sha256(readFileSync(file)),qualifiedSHA,'Materialized source identity: '+file);
-          }
-          console.log('Exact qualified compiler metadata representation authenticated.');
-          NODE
+          node --input-type=module -e "import {compilerPolicy} from './scripts/verify-compiler.mjs'; await compilerPolicy();"
+          node --test tests/source-build-portability.mjs
       - name: Locked browser tooling and application build
         run: |
           npm ci --no-audit --no-fund

@@ -48,6 +48,20 @@ that you control. Localhost or a secure HTTPS context is required for copying;
 plain HTTP on a remote IP is insufficient. No particular host, shared network,
 certificate authority or existing proxy is assumed.
 
+Choose one complete file; plain `docker compose up` selects the legacy installation:
+
+| Installation | Compose file |
+| --- | --- |
+| Published prebuilt image | `compose.ghcr.yaml` |
+| Local source build | `compose.zevyrn.yaml` |
+| Source build with HTTPS | `compose.zevyrn.traefik.yaml` **or** `compose.zevyrn.caddy.yaml` |
+| Existing KeySmith installation | Keep its original Compose file and project name |
+
+The supported container target is **Linux/amd64**: native x86-64 Linux, or
+Docker Desktop using Linux containers. ARM hosts (including Apple Silicon)
+would need amd64 emulation and have not been validated. Windows-container mode
+is unsupported. See [platforms and prerequisites](INSTALLATION.md#platforms-and-prerequisites).
+
 ## Optional developer source build
 
 To build locally, clone this repository, select the intended release tag or
@@ -58,7 +72,9 @@ needs container registries, npm and Alpine repositories.
 ```sh
 git clone https://github.com/TheStateOfWhere/zevyrn-password-generator.git
 cd zevyrn-password-generator
-# After release publication: git checkout --detach v1.2.1
+# Select a published tag or reviewed commit containing the portable-build correction:
+git checkout --detach <TAG_OR_FULL_COMMIT>
+docker compose -p zevyrn -f compose.zevyrn.yaml config
 docker compose -p zevyrn -f compose.zevyrn.yaml build zevyrn
 docker compose -p zevyrn -f compose.zevyrn.yaml up -d --no-build --pull never --wait --wait-timeout 120
 ```
@@ -66,6 +82,10 @@ docker compose -p zevyrn -f compose.zevyrn.yaml up -d --no-build --pull never --
 The local image is `zevyrn:1.2.1-local`. Tests run during the build. A new source
 build is a different artifact and does not inherit the retained release image's
 qualification. Do not bypass tests or pinned inputs.
+Project metadata is verified against exact Git LF bytes; an ordinary checkout
+needs no historical qualification workspace or line-ending conversion. The
+Docker build needs no host Python or Node installation. This correction does
+not resolve the existing builder security blocker or authorize a release.
 
 ## HTTPS: choose Traefik or Caddy
 
@@ -107,6 +127,8 @@ trust needs attention; do not treat `curl -k` as a successful HTTPS test.
 If a port is occupied, choose another port or host address; do not stop another
 application. For prebuilt installs, pull the selected published image; for developer installs, build explicitly.
 See [INSTALLATION.md](INSTALLATION.md) for updates and removal.
+For unhealthy/exited containers, a healthy container with a loading page, or
+reporting a reproducible problem, use the [diagnostic checklist](INSTALLATION.md#diagnostic-checklist).
 
 ## Existing installations
 
