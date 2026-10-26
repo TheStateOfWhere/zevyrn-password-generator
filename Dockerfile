@@ -1,4 +1,4 @@
-FROM node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
 WORKDIR /app
 # Freeze the reviewed npm artifact before installation; application locks stay intact.
 RUN mkdir /tmp/zevyrn-npm-tool \
@@ -26,7 +26,7 @@ FROM nginx:1.30.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77
 # Exact pins fail closed if unavailable; do not switch Alpine branches.
 # Patch libx11 inherited through Nginx's retained image-filter dependencies.
 RUN apk add --no-cache --upgrade \
-      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0
+      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0 brotli-libs=1.2.1-r0
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY --from=build --chown=10001:10001 /app/dist /usr/share/nginx/html
 
