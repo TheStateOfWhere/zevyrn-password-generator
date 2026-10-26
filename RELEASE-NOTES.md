@@ -1,26 +1,31 @@
 # Zevyrn 1.2.1 — unreleased
 
-- Refresh the pinned Nginx runtime base and Alpine Expat/zlib security inputs.
-- Lock development-only browser tooling and repair obsolete optional theme-test
-  expectations without changing application behavior.
-- Add read-only-permission CI for application, Compose, browser, dependency and
-  separate builder/runtime image checks with a runtime SBOM.
-- Pin npm 11.21.1 with artifact verification, replace native TypeScript with the
-  official JavaScript TypeScript 6 wrapper/compiler, and pin the libx11 runtime fix.
-- Make prebuilt GHCR installation the recommended path, with an image-only
-  Compose example; source builds remain an optional developer workflow.
-- Password generation, dictionaries, themes and legacy installation identities
-  remain unchanged.
+- Keep existing passwords when generation fails without a settings change.
+  Changing the active settings still clears results that no longer apply.
+- Show copying, success and failure feedback on the Copy control you used,
+  including in long batches. Delayed responses cannot replace newer feedback.
+- Provide clear reload guidance when the application cannot start, and keep
+  generation unavailable until initialization succeeds.
+- Show a compact summary of the active password settings as you edit them.
+- Identify spaces, including leading and trailing spaces, separately from the
+  password text. Selection and copying preserve the exact characters.
+- Support Docker source builds from an ordinary Git checkout without historical
+  workspace preparation, while retaining compiler and dependency integrity checks.
+- Clarify Compose installation, supported platforms, updates, health checks,
+  startup troubleshooting and reporting problems without exposing secrets.
 
-The retained Linux/amd64 builder and runtime passed controlled qualification and
-independent review, including vulnerability/secrets scans, SBOM reconciliation,
-Compose, hardened runtime, browser and native clipboard acceptance. Documented
-MEDIUM and UNKNOWN findings remain; qualification does not mean vulnerability-free.
-The proposed GHCR image is `ghcr.io/thestateofwhere/zevyrn:1.2.1` and is not yet
-published or registry-verified. Publication must reuse the exact qualified runtime
-without rebuilding and record its registry digest. Git/CI approval, tagging,
-publication and deployment require separate authorization. Historical failed
-attempts are preserved. Documentation changes do not qualify a new source build.
+Password-generation algorithms, the dictionary, entropy requirements, approved
+visual themes and legacy installation compatibility remain unchanged.
+
+These changes have not been published. The planned GHCR image,
+`ghcr.io/thestateofwhere/zevyrn:1.2.1`, remains unavailable pending publication
+and public-pull verification. Compose remains the recommended installation method.
+
+Earlier v1.2.1 artifacts and their qualification records remain historical
+evidence for their exact baseline; they do not qualify this development version.
+The existing builder security blocker remains unresolved. An eventual release
+requires a separately approved final artifact, applicable security qualification
+and publication verification. Historical tags, archives and evidence are preserved.
 
 # Zevyrn 1.2.0 — 2026-10-17
 

@@ -140,39 +140,28 @@ The new Zevyrn files are complete alternatives, not overlays on legacy files.
 
 ## Screenshots
 
-Captured from the real Zevyrn v1.1.0 application at 1280px desktop and 390px
-mobile widths. All five approved themes are shown below. Any visible passwords
-are public examples generated for these screenshots and must not be used as
-credentials. The compact mobile header hides the version label; desktop captures
-show v1.1.0.
+Captured from the accepted, unreleased development baseline `0fa0a77a` at
+1280px desktop and 390px mobile widths. All visible passwords are public,
+deterministic demonstration data and must never be used as credentials.
+Clipboard feedback is shown using a simulated success response.
 
-### Desktop — Zevyrn theme
+### Main interface and active settings
 
-![Zevyrn v1.1.0 desktop in the default Zevyrn theme](docs/screenshots/desktop-zevyrn.jpg)
+![Unreleased Zevyrn desktop with a Readable password and active settings summary](docs/screenshots/desktop-zevyrn.jpg)
 
-### Desktop — Midnight theme
+### Five-password batch and local copy feedback
 
-![Zevyrn v1.1.0 desktop in the Midnight theme](docs/screenshots/desktop-midnight.jpg)
+![Unreleased Zevyrn Strong Random batch in Midnight, with Copied feedback beside the first password](docs/screenshots/batch-five-zevyrn.jpg)
 
-### Desktop — Aurora theme
+### Mobile layout
 
-![Zevyrn v1.1.0 desktop in the Aurora theme](docs/screenshots/desktop-aurora.jpg)
+![Unreleased Zevyrn mobile interface with a Readable password and active settings summary](docs/screenshots/mobile-zevyrn.jpg)
 
-### Desktop — Dusk theme
-
-![Zevyrn v1.1.0 desktop in the Dusk theme](docs/screenshots/desktop-dusk.jpg)
-
-### Desktop — Slate theme
-
-![Zevyrn v1.1.0 desktop in the Slate theme](docs/screenshots/desktop-slate.jpg)
-
-### Mobile responsive layout
-
-![Zevyrn v1.1.0 responsive layout at 390px in the default theme](docs/screenshots/mobile-zevyrn.jpg)
-
-### Five-password batch
-
-![Zevyrn v1.1.0 displaying five generated public example passwords](docs/screenshots/batch-five-zevyrn.jpg)
+Earlier v1.1.0 theme previews remain available for historical reference:
+[Midnight](docs/screenshots/desktop-midnight.jpg),
+[Aurora](docs/screenshots/desktop-aurora.jpg),
+[Dusk](docs/screenshots/desktop-dusk.jpg) and
+[Slate](docs/screenshots/desktop-slate.jpg). The current visual themes are unchanged.
 
 ## Development and licensing
 
