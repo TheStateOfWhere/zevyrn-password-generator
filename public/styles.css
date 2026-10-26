@@ -84,3 +84,9 @@ button,select,summary,textarea,input:not([type=checkbox]),.brand,footer a{min-wi
 .settings-note,.settings select,.toolbar select{background:var(--soft)}
 button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible,textarea:focus-visible,.password-row:focus{outline-color:var(--focus)}
 @media(forced-colors:active){.primary,#generate,#batch-generate,#settings-generate{background:ButtonFace;color:ButtonText}.profiles [aria-pressed=true]{border:2px solid Highlight}.password-row,.batch{background:Canvas}}
+
+/* Development usability: retain the existing palette, controls and geometry. */
+.active-settings{font-size:12px;line-height:1.7;color:var(--muted);margin:2px 0 12px;max-width:90ch;overflow-wrap:anywhere}
+.password-space-note{grid-column:1/-1;grid-row:3;font-size:12px;line-height:1.6;color:var(--muted);margin:0 0 12px}
+.batch .password-space-note{grid-column:1;grid-row:4;margin:4px 0 0}
+@media(max-width:600px){.active-settings,.password-space-note{font-size:11px}}

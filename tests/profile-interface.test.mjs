@@ -64,7 +64,9 @@ test('Custom Policy literal rendering preserves spaces, punctuation, minimums an
   switchTo('custom-policy');get('custom-length').value='128';get('custom-symbol-list').value=' .<>&';
   for(const id of ['uppercase','lowercase','digits','symbols'])get('custom-min-'+id).value='32';
   get('custom-length').dispatch('input');generate();let value=rows()[0].children[1].textContent;
-  assert.equal(value.length,128);assert.equal(rows()[0].children[1].children.length,0);assert.equal(rows()[0].children.length,3);
+  assert.equal(value.length,128);assert.equal(rows()[0].children[1].children.length,0);
+  assert.equal(rows()[0].children.length, value.includes(' ') ? 4 : 3);
+  if(value.includes(' ')) assert.match(rows()[0].children[3].textContent,/Contains \d+ spaces?\./);
   assert.ok(/[.<>& ]/.test(value));assert.ok(!/[lLiIoO01]/.test(value));
   get('custom-digits').checked=false;get('custom-digits').dispatch('change');const before=draws();generate();assert.equal(draws(),before);assert.match(get('strength-note').textContent,/Enable digits/);
   get('custom-digits').checked=true;get('custom-min-uppercase').value='129';get('custom-min-uppercase').dispatch('input');assert.equal(get('generate').disabled,true);

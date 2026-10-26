@@ -3,7 +3,7 @@ import { WORDS } from '../dist/dictionary.js';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 await mkdir('dist/licenses', { recursive: true });
 await copyFile('LICENSE', 'dist/licenses/LICENSE.txt');
-for (const file of ['index.html', 'styles.css', 'theme.js', 'favicon.ico']) await copyFile(`public/${file}`, `dist/${file}`);
+for (const file of ['index.html', 'styles.css', 'theme.js', 'startup.js', 'favicon.ico']) await copyFile(`public/${file}`, `dist/${file}`);
 await copyFile('data/NOTICE.md', 'dist/licenses/NOTICE.txt');
 await copyFile('data/CC-BY-4.0.txt', 'dist/licenses/CC-BY-4.0.txt');
 

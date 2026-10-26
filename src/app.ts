@@ -34,6 +34,9 @@ const clearButton = element<HTMLButtonElement>('clear');
 interface PasswordEntry { value: string; context: ProfileOutput }
 let passwords: PasswordEntry[] = [];
 let revision = 0;
+let copyAttempt = 0;
+const copyLabels = new WeakMap<HTMLButtonElement, string>();
+let clipboardWrite: Promise<void> | undefined;
 let observedSettings: readonly unknown[] = [];
 let keyboardSubmission = false;
 const settings = (): ReadableProfileSettings => ({ minWordLength: min.valueAsNumber, maxWordLength: max.valueAsNumber, suffixLength: suffix.valueAsNumber });
@@ -228,7 +231,7 @@ function passwordRow(entry: PasswordEntry, index: number): HTMLElement {
   if (!valid) throw new Error('Password display validation failed.');
   info.textContent = `${String(index + 1).padStart(2, '0')} / ${password.length} characters`;
   const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'copy-password primary'; copy.textContent = count.value === '1' ? 'Copy Password' : 'Copy'; copy.setAttribute('aria-label', `Copy password ${index + 1}`);
-  copy.addEventListener('click', () => { synchronizeSettings(); if (passwords[index] === entry) void copyText(password, `password ${index + 1}`); });
+  copy.addEventListener('click', () => { synchronizeSettings(); if (passwords[index] === entry) void copyText(password, `password ${index + 1}`, copy); });
   const regenerateButton = document.createElement('button'); regenerateButton.type = 'button';
   regenerateButton.className = 'regenerate'; regenerateButton.textContent = 'Regenerate';
   regenerateButton.setAttribute('aria-label', `Regenerate password ${index + 1}`);
@@ -253,7 +256,7 @@ function passwordRow(entry: PasswordEntry, index: number): HTMLElement {
       const button = document.createElement('button'); button.type = 'button';
       button.textContent = i === 3 ? 'Suffix' : `Word ${i + 1}`;
       button.setAttribute('aria-label', `Copy ${label} of password ${index + 1}`);
-      button.addEventListener('click', () => { synchronizeSettings(); if (passwords[index] === entry) void copyText(part, `${label} of password ${index + 1}`); });
+      button.addEventListener('click', () => { synchronizeSettings(); if (passwords[index] === entry) void copyText(part, `${label} of password ${index + 1}`, button); });
       components.append(button);
     });
     const disclosure = document.createElement('details'); disclosure.className = 'component-disclosure';
@@ -270,12 +273,20 @@ function passwordRow(entry: PasswordEntry, index: number): HTMLElement {
     const hint = document.createElement('p'); hint.className = 'password-hint';
     hint.textContent = 'Periods are literal password characters. No spaces.'; row.append(hint);
   }
+  const spaces = [...password].filter(character => character === ' ').length;
+  if (spaces && show.checked) {
+    const note = document.createElement('p'); note.className = 'password-space-note';
+    const edges = [password.startsWith(' ') ? 'Starts with a space.' : '', password.endsWith(' ') ? 'Ends with a space.' : ''].filter(Boolean);
+    note.textContent = `Contains ${spaces} space${spaces === 1 ? '' : 's'}. ${edges.join(' ')}`.trim();
+    row.append(note);
+  }
   return row;
 }
 function regeneratePassword(index: number, previous: PasswordEntry, row: HTMLElement): void {
   synchronizeSettings();
   // Ignore actions belonging to a cleared or replaced card.
   if (passwords[index] !== previous) return;
+  resetCopyFeedback();
   try {
     const context = prepareProfileOutput(request(), WORDS);
     const replacement = context.generate();
@@ -293,6 +304,7 @@ function regeneratePassword(index: number, previous: PasswordEntry, row: HTMLEle
   }
 }
 function render(): void {
+  resetCopyFeedback();
   list.replaceChildren();
   list.classList.toggle('manual-mode', manual.checked);
   layoutSummary();
@@ -305,14 +317,44 @@ function render(): void {
   }
   copyAll.disabled = !passwords.length; clearButton.disabled = !passwords.length;
 }
-async function copyText(text: string, label: string): Promise<void> {
+function resetCopyFeedback(): void {
+  copyAttempt++;
+  // Labels contain no password data. Weak keys cannot retain cleared cards.
+  for (const button of document.querySelectorAll?.<HTMLButtonElement>('button[data-copy-feedback]') ?? []) {
+    const label = copyLabels.get(button);
+    if (label) button.textContent = label;
+    button.removeAttribute('data-copy-feedback');
+  }
+}
+async function copyText(text: string, label: string, button: HTMLButtonElement): Promise<void> {
+  resetCopyFeedback();
+  const attempt = copyAttempt;
   const currentRevision = revision;
+  if (!copyLabels.has(button)) copyLabels.set(button, button.textContent ?? 'Copy');
+  button.textContent = 'Copying…'; button.setAttribute('data-copy-feedback', 'pending');
+  const previousWrite = clipboardWrite;
+  let release!: () => void;
+  const thisWrite = new Promise<void>(resolve => { release = resolve; });
+  clipboardWrite = thisWrite;
   try {
+    // Native writes cannot be cancelled. Serialize them, skipping queued work
+    // that became stale, so an older write cannot finish after a newer one.
+    if (previousWrite) await previousWrite;
+    if (revision !== currentRevision || attempt !== copyAttempt) return;
     if (!globalThis.isSecureContext || !navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
     await navigator.clipboard.writeText(text);
-    if (revision === currentRevision) status.textContent = `Copied. ${label[0]?.toUpperCase()}${label.slice(1)} copied. Your operating system may retain clipboard history.`;
+    if (revision === currentRevision && attempt === copyAttempt) {
+      button.textContent = 'Copied'; button.setAttribute('data-copy-feedback', 'success');
+      status.textContent = `Copied. ${label[0]?.toUpperCase()}${label.slice(1)} copied. Your operating system may retain clipboard history.`;
+    }
   } catch {
-    if (revision === currentRevision) status.textContent = 'Clipboard unavailable. Show the password and select it to copy, or use large-text mode to type it.';
+    if (revision === currentRevision && attempt === copyAttempt) {
+      button.textContent = 'Copy failed'; button.setAttribute('data-copy-feedback', 'failure');
+      status.textContent = 'Clipboard unavailable. Show the password and select it to copy, or use large-text mode to type it.';
+    }
+  } finally {
+    release();
+    if (clipboardWrite === thisWrite) clipboardWrite = undefined;
   }
 }
 function clear(): void { passwords = []; revision++; render(); }
@@ -329,6 +371,7 @@ form.addEventListener('submit', event => {
   event.preventDefault();
   const keyboard = keyboardSubmission && event.isTrusted;
   keyboardSubmission = false;
+  resetCopyFeedback();
   try {
     synchronizeSettings();summary();
     const quantity = Number(count.value);
@@ -340,7 +383,15 @@ form.addEventListener('submit', event => {
     // Focus announces the named result; otherwise use the existing live status.
     status.textContent = ensureResultVisible(undefined, keyboard) ? ''
       : `${quantity} password${quantity === 1 ? '' : 's'} generated and validated on your device.`;
-  } catch (error) { clear(); summary(); status.textContent = element('policy-status').textContent ? '' : errorMessage(error); }
+  } catch (error) {
+    // synchronizeSettings already invalidates old policies. A failure with the
+    // same settings must not discard valid results or disturb their selection.
+    summary();
+    status.textContent = element('policy-status').textContent ? '' : passwords.length
+      ? `Could not generate new passwords. Existing password${passwords.length === 1 ? '' : 's'} preserved. Try again or check secure browser randomness.`
+      : typeof globalThis.crypto?.getRandomValues !== 'function' ? 'Secure browser randomness is unavailable. Use HTTPS or localhost in a supported browser.'
+      : error instanceof PolicyGenerationError ? errorMessage(error) : 'Could not generate passwords. Try again or reload the page.';
+  }
 });
 function settingsChanged(): void {
   clear(); summary();
@@ -382,7 +433,7 @@ document.addEventListener?.('copy', event => {
 }, true);
 window.addEventListener('focus', synchronizeSettings);
 show.addEventListener('change', () => { synchronizeSettings();render(); }); manual.addEventListener('change', () => { synchronizeSettings();render(); });
-copyAll.addEventListener('click', () => { synchronizeSettings(); if (passwords.length) void copyText(passwords.map(entry => entry.value).join('\n'), 'all passwords'); });
+copyAll.addEventListener('click', () => { synchronizeSettings(); if (passwords.length) void copyText(passwords.map(entry => entry.value).join('\n'), 'all passwords', copyAll); });
 clearButton.addEventListener('click', () => { clear(); status.textContent = 'Passwords cleared from this page. Previously copied text remains on the clipboard.'; });
 // Avoid restoring generated values from back/forward page snapshots.
 window.addEventListener('pagehide', clear);
@@ -417,6 +468,27 @@ function layoutSummary(): void {
   if (note) note.textContent = batch ? 'All results. One sheet.' : 'One password. A clear view.';
 }
 function settingsSummary(): void {
+  const overview = document.getElementById('active-settings');
+  if (overview) {
+    try {
+      const selected = request();
+      const name = selected.profile === 'readable' ? 'Readable' : selected.profile === 'strong-random' ? 'Strong Random' : 'Custom Policy';
+      if (element('policy-status').textContent) overview.textContent = `${name} · Review the marked settings.`;
+      else if (selected.profile === 'readable') {
+        const s = selected.settings;
+        overview.textContent = `Readable · 3 distinct words, ${s.minWordLength}–${s.maxWordLength} letters each · ${s.suffixLength}-character suffix`;
+      } else {
+        const s = selected.settings!;
+        const labels = { uppercase: 'uppercase', lowercase: 'lowercase', digits: 'numbers', symbols: 'symbols' };
+        const categories = CATEGORIES.filter(id => s.allowed[id]).map(id => selected.profile === 'custom-policy'
+          ? `${labels[id]} (minimum ${selected.settings.minimumCounts[id]})` : labels[id]);
+        const exclusions = new Set(s.excludedCharacters).size;
+        const symbolCount = selected.profile === 'custom-policy'
+          ? new Set([...selected.settings.permittedSymbols].filter(character => !s.excludedCharacters.includes(character))).size : 0;
+        overview.textContent = `${name} · ${s.length} characters · ${categories.join(', ')}${s.excludeAmbiguous ? ' · Ambiguous characters excluded' : ''}${exclusions ? ` · ${exclusions} additional exclusion${exclusions === 1 ? '' : 's'}` : ''}${selected.profile === 'custom-policy' && s.allowed.symbols ? ` · ${symbolCount} allowed symbol${symbolCount === 1 ? '' : 's'}` : ''}`;
+      }
+    } catch { overview.textContent = 'Review the marked settings.'; }
+  }
   const warning = document.getElementById('settings-summary-error');
   if (warning) {
     warning.hidden = !element('policy-status').textContent;
