@@ -5,6 +5,18 @@ These instructions target **Zevyrn v1.2.1** from the
 See the [rename notes](docs/REPOSITORY-RENAME.md) for the completed repository
 rename and retained configuration identifiers.
 
+## Supported deployment model
+
+Zevyrn source code and container images are intended for public distribution;
+the running application is supported only on private or internal networks,
+including localhost. Direct internet-facing deployment is unsupported. You are
+responsible for keeping access limited to your intended internal users.
+
+The current scope does not require application accounts or a login system.
+Internal reverse proxies and trusted HTTPS are supported options. This network
+boundary does not remove application vulnerabilities, browser risks or the need
+to review updates and security findings.
+
 ## Prebuilt image (recommended)
 
 ### Platforms and prerequisites
@@ -66,9 +78,35 @@ not runnable. Shell variables override `.env`; keep the same settings for every
 command. Public GHCR packages can be pulled anonymously once made public.
 Registry access is needed for the initial pull and updates.
 
+### Access from other internal devices
+
+The standalone examples bind to `127.0.0.1`; another device cannot use its own
+`localhost` to reach the Docker host. Changing `ZEVYRN_PORT` changes only the
+host port, not this loopback binding. Keep that default for host-only use.
+
+For internal-device access, use your existing internal HTTPS proxy as described
+below, or one complete source-build HTTPS example. For those source-build
+examples, set `ZEVYRN_BIND_IP` to the Docker host's actual private LAN address
+(for example `192.168.1.20`, only if assigned to that host), set `ZEVYRN_DOMAIN`
+to a hostname your internal clients resolve to it, and supply the matching
+trusted certificate. Open `https://<your-hostname>` from those devices and check
+`https://<your-hostname>/healthz`. Follow the certificate prerequisites below.
+
+Do not select `0.0.0.0`, `::`, or a public host address for these examples. Do not
+forward the application or proxy port from the Internet, or expose it through
+a public proxy or tunnel. A private address, HTTPS or a DNS name alone does not
+enforce internal-only access: confirm your existing routing and access controls
+limit reachability to intended users, including IPv6 where configured. These
+examples do not configure those controls. Do not publish backend port 8080.
+Remote plain HTTP does not provide the browser secure context needed for copying.
+
+Docker's [port-publishing documentation](https://docs.docker.com/engine/network/port-publishing/)
+explains host-address binding; omitting an address normally publishes on all
+interfaces. Retain the explicit bindings in the supplied files.
+
 ### Optional reverse proxy
 
-For a proxy on the Docker host, route your own HTTPS hostname to
+For an internal proxy on the Docker host, route your own HTTPS hostname to
 `http://127.0.0.1:18080`. Configure a valid matching certificate and normal browser
 trust. If a proxy runs in another container, its localhost is not the app:
 connect it and Zevyrn to an explicitly chosen dedicated network and route to
@@ -183,8 +221,8 @@ Never disable certificate verification to make an installation test pass.
    traversal of parent directories. Do not make the key world-readable.
 4. Confirm browsers trust the issuing CA. Certificate issuance and renewal are
    your responsibility; these examples use existing certificates, not ACME.
-5. Make the intended host address and TCP 443 reachable by your users. Backend
-   8080, Docker API and proxy administration ports are not published. The app
+5. Make the intended private host address and TCP 443 reachable only by your
+   intended internal users. Backend 8080, Docker API and proxy administration ports are not published. The app
    has no login system; choose access appropriate to your installation.
 
 ```sh
@@ -194,7 +232,9 @@ cp zevyrn.env.example .env
 
 Use a fresh `.env` file, not an existing file belonging to another application.
 It contains configuration, not private-key contents. The default bind address in
-the example is loopback; for remote clients select an address on your Docker host.
+the example is loopback; for other internal devices select the host's private
+LAN address as described
+in [internal-device access](#access-from-other-internal-devices).
 The TLS directory must already exist and contain the two files above. Do not use
 an unrelated application's certificate or network without its owner's permission.
 
@@ -260,7 +300,8 @@ services remain non-root with read-only filesystems and `no-new-privileges`.
 
 Application `/healthz` returns HTTP 200 and `ok`. Compose waits for the app's
 health check before starting its proxy. The HTTPS request above verifies the
-public route and normal certificate validation; Compose status alone does not.
+internal HTTPS route and normal certificate validation; Compose status alone
+does not.
 Check Generate, Copy, settings and themes in your browser after setup.
 
 Use the same project/file options for status and bounded logs:
@@ -393,7 +434,8 @@ required by these examples.
 
 The original `compose.yaml`, `compose.traefik.yaml`, `compose.caddy.yaml`,
 `.env.example`, `examples/traefik/dynamic/keysmith.yaml` and
-`examples/caddy/Caddyfile` remain supported and unchanged. Keep the same project,
+`examples/caddy/Caddyfile` remain available and unchanged. The private/internal
+network support boundary also applies to these examples. Keep the same project,
 service, `KEYSMITH_*` settings, external certificates and any operator-specific
 proxy configuration. The local image name `keysmith:1.0.0-local` is a retained
 compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.1.

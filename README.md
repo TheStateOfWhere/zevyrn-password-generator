@@ -12,6 +12,18 @@ Passwords are generated on your device using Web Crypto. There is no backend
 password storage, telemetry or external dictionary service. Only the selected
 theme is saved. Clear does not erase OS clipboard history or securely wipe memory.
 
+## Supported deployment
+
+Zevyrn source code and Docker images are intended for public distribution.
+Running Zevyrn is supported only on private or internal networks, including
+localhost. Direct internet-facing deployment is outside the supported
+configuration. Operators are responsible for controlling access; the current
+application scope does not require an application authentication system.
+
+Internal reverse proxies and trusted HTTPS are supported. Private-network
+placement does not eliminate application, browser or dependency risks. See
+[internal-network access](INSTALLATION.md#access-from-other-internal-devices).
+
 ## Install the prebuilt container (recommended)
 
 The planned release image is `ghcr.io/thestateofwhere/zevyrn:1.2.1`
@@ -43,8 +55,8 @@ tag or `ghcr.io/thestateofwhere/zevyrn@sha256:<published-manifest-digest>`.
 Keep overrides in your own `.env` and use the same settings on every command.
 See [installation and updates](INSTALLATION.md#prebuilt-image-recommended).
 
-For remote browsers, use a reverse proxy with HTTPS and a hostname/certificate
-that you control. Localhost or a secure HTTPS context is required for copying;
+For browsers on other internal devices, use an internal reverse proxy with HTTPS
+and a hostname/certificate that you control. Localhost or a secure HTTPS context is required for copying;
 plain HTTP on a remote IP is insufficient. No particular host, shared network,
 certificate authority or existing proxy is assumed.
 
@@ -89,8 +101,8 @@ not resolve the existing builder security blocker or authorize a release.
 
 ## HTTPS: choose Traefik or Caddy
 
-The optional source-build proxy examples in [INSTALLATION.md](INSTALLATION.md) use an existing
-certificate. Both source-build examples create their own project network, publish only TCP 443,
+The optional internal-network source-build proxy examples in
+[INSTALLATION.md](INSTALLATION.md) use an existing certificate. Both source-build examples create their own project network, publish only TCP 443,
 and route to `zevyrn:8080`. No Docker socket or external proxy network is needed.
 Use one complete Compose file at a time; do not combine the alternatives.
 
@@ -109,7 +121,9 @@ existing-certificate examples. HTTPS or localhost is required for browser copyin
 Choose a hostname you control and set `ZEVYRN_DOMAIN` to that bare name, without
 `https://` or a port. Public DNS and internal DNS are both supported; clients must
 use a resolver that knows the record. A public DNS name does not require public
-Internet access to the application. See [DNS and certificate trust](INSTALLATION.md#choose-a-hostname-and-client-trust)
+Internet access to the application and does not make direct internet-facing
+deployment supported. Keep access limited to intended internal users. See
+[DNS and certificate trust](INSTALLATION.md#choose-a-hostname-and-client-trust)
 and the [update commands](INSTALLATION.md#updates).
 
 ## Troubleshooting
