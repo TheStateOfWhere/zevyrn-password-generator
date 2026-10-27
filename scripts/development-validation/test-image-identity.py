@@ -1,5 +1,6 @@
 """Synthetic archive tests only: no Docker, SSH, scanner, or network execution."""
 import ast
+import base64
 import copy
 import gzip
 import hashlib
@@ -16,6 +17,7 @@ NS = runpy.run_path(str(HERE / 'remote-driver.py'), run_name='identity_tests')
 INDEX = 'application/vnd.oci.image.index.v1+json'
 MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
 CONFIG = 'application/vnd.oci.image.config.v1+json'
+EMPTY = 'application/vnd.oci.empty.v1+json'
 LAYER = 'application/vnd.oci.image.layer.v1.tar'
 
 def sha(data):
@@ -58,6 +60,25 @@ class Fixture:
         self.inspect.update(Id=self.i['digest'], Descriptor=self.i.copy())
         self.files['index.json'] = json.dumps({'schemaVersion': 2, 'mediaType': INDEX, 'manifests': [self.i]}).encode()
 
+    def empty_attestation(self, config_edit=None, descriptor_edit=None, payload=b'{}'):
+        # Actual observed descriptor: empty.v1+json, two bytes, embedded Base64.
+        config = {'mediaType': EMPTY, 'digest': sha(payload), 'size': len(payload),
+                  'data': base64.b64encode(payload).decode('ascii')}
+        self.files['blobs/sha256/' + config['digest'][7:]] = payload
+        if config_edit: config_edit(config)
+        statement = b'synthetic attestation; not execution evidence'
+        layer = {'mediaType': 'application/vnd.in-toto+json', 'digest': sha(statement), 'size': len(statement)}
+        self.files['blobs/sha256/' + layer['digest'][7:]] = statement
+        raw = json.dumps({'schemaVersion': 2, 'mediaType': MANIFEST, 'config': config, 'layers': [layer]}).encode()
+        attestation = {'mediaType': MANIFEST, 'digest': sha(raw), 'size': len(raw),
+                       'platform': {'os': 'unknown', 'architecture': 'unknown'},
+                       'annotations': {'vnd.docker.reference.type': 'attestation-manifest',
+                                       'vnd.docker.reference.digest': self.m['digest']}}
+        self.files['blobs/sha256/' + attestation['digest'][7:]] = raw
+        if descriptor_edit: descriptor_edit(attestation)
+        self.replace_index(lambda value: value['manifests'].append(attestation))
+        return config
+
     def check(self, extra=None):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / 'image.tar'
@@ -97,9 +118,66 @@ class IdentityTests(unittest.TestCase):
         raw = json.dumps({'schemaVersion': 2, 'mediaType': MANIFEST, 'config': c, 'layers': f.layers}).encode()
         a = {'mediaType': MANIFEST, 'digest': sha(raw), 'size': len(raw),
              'platform': {'os': 'unknown', 'architecture': 'unknown'},
-             'annotations': {'vnd.docker.reference.type': 'attestation-manifest'}}
+             'annotations': {'vnd.docker.reference.type': 'attestation-manifest',
+                             'vnd.docker.reference.digest': f.m['digest']}}
         f.files['blobs/sha256/' + a['digest'][7:]] = raw
         f.replace_index(lambda v: v['manifests'].append(a)); f.check()
+
+    def test_actual_empty_configuration_attestation(self):
+        f = Fixture(); c = f.empty_attestation()
+        self.assertEqual(c['digest'], 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a')
+        self.assertEqual(c['size'], 2)
+        identity = f.check()
+        self.assertEqual(identity['manifestDigest'], f.m['digest'])
+        self.assertEqual(identity['configurationDigest'], f.c['digest'])
+
+    def test_empty_attestation_config_without_embedded_data(self):
+        f = Fixture(); f.empty_attestation(config_edit=lambda c: c.pop('data')); f.check()
+
+    def test_valid_embedded_runnable_configuration_is_verified(self):
+        f = Fixture(); data = f.files['blobs/sha256/' + f.c['digest'][7:]]
+        f.object(f.m, lambda m: m['config'].update(data=base64.b64encode(data).decode('ascii')))
+        f.replace_index(lambda i: i.update(manifests=[f.m])); f.check()
+
+    def test_embedded_encoding_type_and_bounds_fail_closed(self):
+        for value in ['not base64!', 'AA==extra', 'é', None, 4, 'A'*87385]:
+            with self.subTest(valueType=type(value).__name__):
+                f = Fixture(); f.empty_attestation(config_edit=lambda c: c.update(data=value))
+                with self.assertRaises(RuntimeError): f.check()
+
+    def test_embedded_size_and_digest_mismatches(self):
+        for edit in [lambda c: c.update(size=3), lambda c: c.update(digest='sha256:'+'0'*64),
+                     lambda c: c.update(data=base64.b64encode(b'xx').decode('ascii')),
+                     lambda c: c.update(data=base64.b64encode(b'').decode('ascii'))]:
+            f = Fixture(); f.empty_attestation(config_edit=edit)
+            with self.assertRaises(RuntimeError): f.check()
+
+    def test_embedded_data_does_not_replace_missing_or_conflicting_archive_blob(self):
+        for absent in [True,False]:
+            f = Fixture(); c = f.empty_attestation(); key = 'blobs/sha256/'+c['digest'][7:]
+            if absent: del f.files[key]
+            else: f.files[key] = b'xx'
+            with self.assertRaises(RuntimeError): f.check()
+
+    def test_empty_config_requires_exact_empty_payload(self):
+        for payload in [b'[]', b'{ }', b'{"os":"unknown","architecture":"unknown"}']:
+            f = Fixture(); f.empty_attestation(payload=payload)
+            with self.assertRaisesRegex(RuntimeError,'OCI_ATTESTATION_EMPTY_CONFIG'): f.check()
+
+    def test_empty_config_cannot_be_runnable(self):
+        f=Fixture(); c=f.empty_attestation()
+        f.object(f.m,lambda m:m.update(config=c))
+        f.replace_index(lambda i:i.update(manifests=[f.m]))
+        with self.assertRaisesRegex(RuntimeError,'OCI_CONFIG_TYPE'):f.check()
+
+    def test_attestation_reference_and_platform_are_bound_to_selected_image(self):
+        for edit in [lambda a:a['annotations'].pop('vnd.docker.reference.digest'),
+                     lambda a:a['annotations'].update({'vnd.docker.reference.digest':'sha256:'+'0'*64}),
+                     lambda a:a.update(platform={'os':'linux','architecture':'amd64'}),
+                     lambda a:a.update(platform={'os':'unknown','architecture':'amd64'}),
+                     lambda a:a['platform'].update(variant='v1')]:
+            f=Fixture();f.empty_attestation(descriptor_edit=edit)
+            with self.assertRaises(RuntimeError):f.check()
 
     def test_missing_or_corrupt_each_chain_blob(self):
         for field in ['i', 'm', 'c']:

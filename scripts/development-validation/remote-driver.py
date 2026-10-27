@@ -2,7 +2,7 @@
 Preparation is not authorization. Invoked only by the separately approved launcher.
 No canonical controller imports, exception handling, publication or global cleanup.
 """
-import contextlib, datetime, hashlib, io, json, os, pathlib, shutil, socket
+import base64, binascii, contextlib, datetime, hashlib, io, json, os, pathlib, shutil, socket
 import stat, subprocess, sys, tarfile, time, urllib.request, signal, re
 
 R = pathlib.Path('/home/user/zevyrn-candidate-7989bc8-20261026-01')
@@ -172,6 +172,8 @@ def image_archive_identity(archive, inspected):
     INDEX = 'application/vnd.oci.image.index.v1+json'
     MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
     CONFIG = 'application/vnd.oci.image.config.v1+json'
+    EMPTY = 'application/vnd.oci.empty.v1+json'
+    EMPTY_DIGEST = 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
     with tarfile.open(archive, mode='r:') as tf:
         members = {}
         for member in tf:
@@ -199,7 +201,17 @@ def image_archive_identity(archive, inspected):
             require(isinstance(desc, dict) and isinstance(desc.get('digest'), str) and
                     re.fullmatch(r'sha256:[a-f0-9]{64}', desc['digest']) and
                     type(desc.get('size')) is int and desc['size'] >= 0 and
-                    not any(k in desc for k in ('urls', 'data')), 'OCI_DESCRIPTOR')
+                    'urls' not in desc, 'OCI_DESCRIPTOR')
+            embedded = None
+            if 'data' in desc:
+                require(isinstance(desc['data'], str) and desc['size'] <= 65536 and
+                        len(desc['data']) <= 4 * ((65536 + 2) // 3), 'OCI_EMBEDDED_DATA_LIMIT')
+                try:
+                    embedded = base64.b64decode(desc['data'], validate=True)
+                except (ValueError, binascii.Error):
+                    raise RuntimeError('OCI_EMBEDDED_DATA_ENCODING') from None
+                require(len(embedded) == desc['size'] and
+                        'sha256:' + digest(embedded) == desc['digest'], 'OCI_EMBEDDED_DATA_IDENTITY')
             name = 'blobs/sha256/' + desc['digest'][7:]
             member = members.get(name)
             require(member is not None and member.isfile() and member.size == desc['size'], 'OCI_DESCRIPTOR_SIZE_OR_MISSING')
@@ -208,11 +220,14 @@ def image_archive_identity(archive, inspected):
                 for block in iter(lambda: stream.read(1024**2), b''):
                     h.update(block)
             require('sha256:' + h.hexdigest() == desc['digest'], 'OCI_DESCRIPTOR_HASH')
+            if embedded is not None:
+                require(tf.extractfile(member).read() == embedded, 'OCI_EMBEDDED_BLOB_MISMATCH')
             return name
 
         require(read_json('oci-layout') == {'imageLayoutVersion': '1.0.0'}, 'OCI_LAYOUT')
         root = read_json('index.json')
         candidates = []
+        attestations = []
         visited = set()
 
         def walk(index, chain, depth):
@@ -231,8 +246,6 @@ def image_archive_identity(archive, inspected):
                         'OCI_MANIFEST')
                 config_desc = obj.get('config')
                 config_name = blob(config_desc)
-                require(config_desc.get('mediaType') == CONFIG, 'OCI_CONFIG_TYPE')
-                config = read_json(config_name)
                 layers = obj.get('layers')
                 require(isinstance(layers, list) and 0 < len(layers) <= 256, 'OCI_LAYERS')
                 for layer in layers:
@@ -242,8 +255,21 @@ def image_archive_identity(archive, inspected):
                 attestation = desc.get('annotations', {}).get('vnd.docker.reference.type') == 'attestation-manifest'
                 if attestation:
                     require(platform.get('os') == platform.get('architecture') == 'unknown' and
-                            config.get('os') == config.get('architecture') == 'unknown', 'OCI_ATTESTATION_PLATFORM')
+                            not platform.get('variant'), 'OCI_ATTESTATION_PLATFORM')
+                    if config_desc.get('mediaType') == EMPTY:
+                        require(config_desc['digest'] == EMPTY_DIGEST and config_desc['size'] == 2 and
+                                tf.extractfile(members[config_name]).read() == b'{}', 'OCI_ATTESTATION_EMPTY_CONFIG')
+                    else:
+                        require(config_desc.get('mediaType') == CONFIG, 'OCI_CONFIG_TYPE')
+                        config = read_json(config_name)
+                        require(config.get('os') == config.get('architecture') == 'unknown', 'OCI_ATTESTATION_PLATFORM')
+                    reference = desc['annotations'].get('vnd.docker.reference.digest')
+                    require(isinstance(reference, str) and re.fullmatch(r'sha256:[a-f0-9]{64}', reference),
+                            'OCI_ATTESTATION_REFERENCE')
+                    attestations.append(reference)
                     continue
+                require(config_desc.get('mediaType') == CONFIG, 'OCI_CONFIG_TYPE')
+                config = read_json(config_name)
                 require(config.get('os') == platform.get('os') and
                         config.get('architecture') == platform.get('architecture'), 'OCI_CONFIG_PLATFORM')
                 if platform.get('os') != 'linux' or platform.get('architecture') != 'amd64':
@@ -272,6 +298,7 @@ def image_archive_identity(archive, inspected):
         walk(root, [root_digest], 0)
         require(len(candidates) == 1, 'OCI_RUNNABLE_SELECTION')
         identity = candidates[0]
+        require(all(reference == identity['manifestDigest'] for reference in attestations), 'OCI_ATTESTATION_REFERENCE')
         require(inspected.get('Os') == 'linux' and inspected.get('Architecture') == 'amd64' and
                 inspected.get('RootFS', {}).get('Type') == 'layers' and
                 inspected['RootFS'].get('Layers') == identity['diffIDs'], 'DOCKER_CONFIGURATION_MISMATCH')
