@@ -26,16 +26,16 @@ button:disabled{opacity:.6;cursor:not-allowed}button,a,input,select,textarea,sum
 
 @media(max-width:600px){.focus .password-row{grid-template-columns:145px minmax(0,1fr);padding-top:16px;padding-bottom:12px}.focus .password{padding:10px 0 8px}.focus .row-top .copy-password{min-width:145px;white-space:nowrap}}
 
-/* Mobile rhythm only: retain 44px targets and the approved shared controls. */
+/* Mobile rhythm includes the settings summary; retain type sizes and 44px targets. */
 @media(max-width:600px){
   .topbar{height:60px}
-  .intro{padding:14px 0 12px}
+  .intro{padding:6px 0 4px}
   .intro .eyebrow{margin-bottom:6px}
-  .profiles{padding:4px;margin-bottom:8px}
+  .profiles{padding:4px;margin-bottom:4px}
   .profiles button{min-height:44px}
   .view-tools{margin-top:0}
   .results-top{margin-top:0}
-  .focus .password-row{padding-top:12px}
+  .focus .password-row{padding-top:8px}
   .focus .password{padding-top:6px}
 }
 
@@ -89,4 +89,4 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
 .active-settings{font-size:12px;line-height:1.7;color:var(--muted);margin:2px 0 12px;max-width:90ch;overflow-wrap:anywhere}
 .password-space-note{grid-column:1/-1;grid-row:3;font-size:12px;line-height:1.6;color:var(--muted);margin:0 0 12px}
 .batch .password-space-note{grid-column:1;grid-row:4;margin:4px 0 0}
-@media(max-width:600px){.active-settings,.password-space-note{font-size:11px}}
+@media(max-width:600px){.active-settings,.password-space-note{font-size:11px}.active-settings{margin:0}}
