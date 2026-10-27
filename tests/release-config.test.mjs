@@ -113,7 +113,7 @@ test('runtime port reset uses the complete patched pinned filesystem without own
 
 test('runtime HIGH fixes pin libx11 and Brotli without removing dependencies or expanding APK upgrades', async () => {
   const dockerfile = await read('Dockerfile');
-  const expected = 'RUN apk add --no-cache --upgrade \\\n      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0 brotli-libs=1.2.1-r0';
+  const expected = 'RUN apk add --no-cache --upgrade \\\n      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0 brotli-libs=1.2.1-r0 curl=8.23.0-r0 libcurl=8.23.0-r0';
   const verify = text => {
     const stage = text.split(/^FROM nginx:[^\n]+ AS runtime-rootfs$/m)[1]?.split(/^FROM scratch AS runtime$/m)[0];
     assert.ok(stage, 'the existing pinned runtime stages must remain');
@@ -122,6 +122,12 @@ test('runtime HIGH fixes pin libx11 and Brotli without removing dependencies or 
   };
   verify(dockerfile);
   for (const changed of [
+    dockerfile.replace(' curl=8.23.0-r0', ''),
+    dockerfile.replace(' curl=8.23.0-r0', ' curl=8.22.0-r0'),
+    dockerfile.replace(' curl=8.23.0-r0', ' curl'),
+    dockerfile.replace(' libcurl=8.23.0-r0', ''),
+    dockerfile.replace(' libcurl=8.23.0-r0', ' libcurl=8.22.0-r0'),
+    dockerfile.replace(' libcurl=8.23.0-r0', ' libcurl'),
     dockerfile.replace(' brotli-libs=1.2.1-r0', ''),
     dockerfile.replace('brotli-libs=1.2.1-r0', 'brotli-libs=1.2.0-r1'),
     dockerfile.replace('brotli-libs=1.2.1-r0', 'brotli-libs'),
