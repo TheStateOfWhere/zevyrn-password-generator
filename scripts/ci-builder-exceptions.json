@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "cve": "CVE-2026-109869",
+      "package": "undici",
+      "version": "6.29.0",
+      "path": "usr/local/lib/node_modules/npm/node_modules/undici/package.json",
+      "rationale": "Previously accepted builder-only residual risk. The owner explicitly approved applying that decision to this exact occurrence in ordinary CI; the Nginx runtime does not contain it.",
+      "reviewReference": "Owner approval of all four Zevyrn CI exception decisions, 2026-10-27; existing CVE-2026-109869 risk decision. Review on build/dependency usage changes; effective until revised or removed."
+    },
+    {
+      "cve": "CVE-2026-109383",
+      "package": "undici",
+      "version": "6.29.0",
+      "path": "usr/local/lib/node_modules/npm/node_modules/undici/package.json",
+      "rationale": "Assessed non-applicable to the inspected invocation: npm's node-gyp downloader uses connect/requestTls/proxyTls rather than the affected function-valued tls option. Reassess if client usage changes.",
+      "reviewReference": "Owner endorsement of the Zevyrn post-release CI applicability assessment, 2026-10-27; GHSA-2m5v-pch6-74hx. Review on build/dependency usage changes; effective until revised or removed."
+    },
+    {
+      "cve": "CVE-2026-87018",
+      "package": "undici",
+      "version": "6.29.0",
+      "path": "usr/local/lib/node_modules/npm/node_modules/undici/package.json",
+      "rationale": "Owner accepts the latent builder availability risk from a hostile TLS 1.2 peer if the node-gyp downloader is invoked. That native-build path is dormant in the inspected locked Linux build; this does not cover runtime exposure or other occurrences.",
+      "reviewReference": "Explicit owner acceptance in the Zevyrn post-release CI review, 2026-10-27; GHSA-qrxm-fqhp-jwvm. Review on build/dependency usage changes; effective until revised or removed."
+    }
+  ]
+}

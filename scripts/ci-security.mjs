@@ -22,13 +22,31 @@ function packages(result) {
   return result.Packages;
 }
 
-export function assessTrivy(report,role) {
+function builderExceptionPolicy(policy) {
+  const fields=['cve','package','version','path','rationale','reviewReference'];
+  if(!policy||policy.schemaVersion!==1||!Array.isArray(policy.exceptions)
+    ||Object.keys(policy).sort().join(',')!=='exceptions,schemaVersion') throw Error('Invalid builder exception policy');
+  const seen=new Set();
+  for(const entry of policy.exceptions) {
+    if(!entry||Object.keys(entry).sort().join(',')!==[...fields].sort().join(',')
+      ||!fields.every(key=>typeof entry[key]==='string'&&entry[key].trim())
+      ||!/^CVE-\d{4}-\d{4,}$/.test(entry.cve)||/[?*]/.test(entry.package+entry.version+entry.path)
+      ||imagePath(entry.path)!==entry.path) throw Error('Invalid builder exception entry');
+    const identity=JSON.stringify([entry.cve,entry.package,entry.version,entry.path]);
+    if(seen.has(identity)) throw Error('Duplicate builder exception');
+    seen.add(identity);
+  }
+  return policy.exceptions;
+}
+
+export function assessTrivy(report,role,exceptionPolicy={schemaVersion:1,exceptions:[]}) {
   // A CI coverage check, not the archive-bound image-qualification validator.
   if(!['runtime','builder'].includes(role)) throw Error('Expected CI image role');
   if(report?.SchemaVersion!==2||report.ArtifactType!=='container_image'||report.Trivy?.Version!=='0.76.0'
     ||!/^sha256:[0-9a-f]{64}$/.test(report.Metadata?.ImageID||'')||report.Metadata?.OS?.Family!=='alpine'
     ||['error','Error','Errors'].some(key=>Object.hasOwn(report,key))||!Array.isArray(report.Results)||!report.Results.length) throw Error('Invalid Trivy report or missing coverage');
-  let blockingVulnerabilities=0,secrets=0;
+  const exceptions=role==='builder'?builderExceptionPolicy(exceptionPolicy):[];
+  let blockingVulnerabilities=0,secrets=0,rawBlockingVulnerabilities=0,approvedHighCount=0,unapprovedHighCount=0;
   const os=new Map(),node=new Map();let osTargets=0;
   const results=report.Results.map(result=>{
     if (!result || typeof result.Target!=='string'||!result.Target.trim()) throw Error('Invalid Trivy target');
@@ -46,8 +64,23 @@ export function assessTrivy(report,role) {
     } else if(result.Class!=='secret'||!Array.isArray(result.Secrets)||!result.Secrets.length) throw Error('Unrecognized or unexpected scanner coverage');
     const vulnerabilities=(result.Vulnerabilities||[]).map(v=>{
       if(!v || typeof v.Severity!=='string' || !['UNKNOWN','LOW','MEDIUM','HIGH','CRITICAL'].includes(v.Severity.toUpperCase()) || typeof v.VulnerabilityID!=='string'||!v.VulnerabilityID) throw Error('Invalid vulnerability');
-      if(['HIGH','CRITICAL'].includes(v.Severity.toUpperCase())) blockingVulnerabilities++;
-      return {id:v.VulnerabilityID,package:v.PkgName,installed:v.InstalledVersion,fixed:v.FixedVersion,severity:v.Severity,status:v.Status,url:v.PrimaryURL};
+      const severity=v.Severity.toUpperCase();
+      const path=role==='builder'&&result.Class==='lang-pkgs'&&result.Type==='node-pkg'
+        &&typeof v.PkgPath==='string'&&v.PkgPath?imagePath(v.PkgPath):undefined;
+      const pkg=path&&node.get(path);
+      const exception=role==='builder'&&severity==='HIGH'&&result.Class==='lang-pkgs'&&result.Type==='node-pkg'
+        &&pkg?.Name===v.PkgName&&pkg?.Version===v.InstalledVersion
+        &&exceptions.find(entry=>entry.cve===v.VulnerabilityID&&entry.package===v.PkgName
+          &&entry.version===v.InstalledVersion&&entry.path===path);
+      if(['HIGH','CRITICAL'].includes(severity)) {
+        rawBlockingVulnerabilities++;
+        if(exception) approvedHighCount++;
+        else {blockingVulnerabilities++;if(severity==='HIGH')unapprovedHighCount++;}
+      }
+      const finding={id:v.VulnerabilityID,package:v.PkgName,installed:v.InstalledVersion,fixed:v.FixedVersion,severity:v.Severity,status:v.Status,url:v.PrimaryURL};
+      if(role==='builder'&&path)finding.path=path;
+      if(exception)finding.exception={rationale:exception.rationale,reviewReference:exception.reviewReference};
+      return finding;
     });
     const secretFindings=(result.Secrets||[]).map(s=>{
       if(!s||typeof s.RuleID!=='string'||!s.RuleID) throw Error('Invalid secret finding');
@@ -59,7 +92,9 @@ export function assessTrivy(report,role) {
   if(osTargets!==1) throw Error('Missing OS coverage');
   if(role==='runtime'&&!['nginx','libexpat','zlib'].every(name=>os.has(name))) throw Error('Missing runtime package coverage');
   if(role==='builder'&&(!requiredNode.every(p=>node.get(p.path)?.Name===p.name&&node.get(p.path)?.Version===p.version))) throw Error('Missing builder dependency coverage');
-  return {blocked:blockingVulnerabilities>0||secrets>0,blockingVulnerabilities,secrets,results};
+  const summary={blocked:blockingVulnerabilities>0||secrets>0,blockingVulnerabilities,secrets,results};
+  if(role==='builder')Object.assign(summary,{rawBlockingVulnerabilities,approvedHighCount,unapprovedHighCount});
+  return summary;
 }
 
 export function assessNpm(report) {
@@ -77,7 +112,8 @@ async function main() {
   let blocked=false;
   for(let i=0;i<pairs.length;i+=2){
     const input=JSON.parse(await readFile(pairs[i],'utf8'));
-    const summary=kind==='trivy'?assessTrivy(input,i===0?'runtime':'builder'):assessNpm(input);
+    const policy=kind==='trivy'&&i===2?JSON.parse(await readFile(new URL('./ci-builder-exceptions.json',import.meta.url),'utf8')):undefined;
+    const summary=kind==='trivy'?assessTrivy(input,i===0?'runtime':'builder',policy):assessNpm(input);
     await mkdir(dirname(pairs[i+1]),{recursive:true});
     await writeFile(pairs[i+1],JSON.stringify(summary,null,2)+'\n');
     blocked ||= summary.blocked;

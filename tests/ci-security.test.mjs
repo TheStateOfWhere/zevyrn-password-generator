@@ -21,6 +21,113 @@ function builder() {
   return r;
 }
 
+const exceptionPolicy=JSON.parse(await readFile(new URL('../scripts/ci-builder-exceptions.json',import.meta.url),'utf8'));
+function reviewedBuilder() {
+  const report=builder();
+  const entry=exceptionPolicy.exceptions[0];
+  report.Results[1].Packages.push({Name:entry.package,Version:entry.version,FilePath:entry.path});
+  report.Results[1].Vulnerabilities=exceptionPolicy.exceptions.map(entry=>({
+    VulnerabilityID:entry.cve,PkgName:entry.package,InstalledVersion:entry.version,PkgPath:entry.path,
+    Severity:'HIGH',FixedVersion:'6.29.1',Status:'fixed'
+  }));
+  return report;
+}
+
+test('reviewed builder HIGH occurrences remain visible with original severities and approval explanations',()=>{
+  assert.deepEqual(exceptionPolicy.exceptions.map(e=>e.cve).sort(),['CVE-2026-109383','CVE-2026-109869','CVE-2026-87018']);
+  for(const entry of exceptionPolicy.exceptions) {
+    assert.equal(entry.package,'undici');assert.equal(entry.version,'6.29.0');
+    assert.equal(entry.path,'usr/local/lib/node_modules/npm/node_modules/undici/package.json');
+  }
+  const report=reviewedBuilder(),original=structuredClone(report);
+  const result=assessTrivy(report,'builder',exceptionPolicy);
+  assert.equal(result.blocked,false);assert.equal(result.blockingVulnerabilities,0);
+  assert.equal(result.rawBlockingVulnerabilities,3);assert.equal(result.approvedHighCount,3);assert.equal(result.unapprovedHighCount,0);
+  assert.equal(result.results[1].vulnerabilities.length,3);
+  for(const [i,finding] of result.results[1].vulnerabilities.entries()) {
+    assert.equal(finding.id,report.Results[1].Vulnerabilities[i].VulnerabilityID);
+    assert.equal(finding.severity,'HIGH');assert.equal(finding.installed,'6.29.0');assert.equal(finding.fixed,'6.29.1');
+    assert.equal(finding.path,exceptionPolicy.exceptions[i].path);
+    assert.deepEqual(finding.exception,{rationale:exceptionPolicy.exceptions[i].rationale,reviewReference:exceptionPolicy.exceptions[i].reviewReference});
+  }
+  assert.deepEqual(report,original,'Assessment must not modify the scanner report');
+  assert.equal(assessTrivy(report,'builder').blocked,true,'No implicit exceptions in the assessment API');
+});
+
+test('other CVEs, package names, versions and paths remain blocking for each reviewed builder HIGH',()=>{
+  for(let index=0;index<3;index++)for(const field of ['VulnerabilityID','PkgName','InstalledVersion','PkgPath']) {
+    const report=reviewedBuilder(),v=report.Results[1].Vulnerabilities[index],pkg=report.Results[1].Packages.at(-1);
+    if(field==='VulnerabilityID')v[field]='CVE-2099-99999';
+    if(field==='PkgName'){v[field]='other-package';pkg.Name=v[field];}
+    if(field==='InstalledVersion'){v[field]='6.29.1';pkg.Version=v[field];}
+    if(field==='PkgPath'){v[field]='app/node_modules/undici/package.json';pkg.FilePath=v[field];}
+    const result=assessTrivy(report,'builder',exceptionPolicy);
+    assert.equal(result.blocked,true,field);assert.ok(result.unapprovedHighCount>=1,field);
+    assert.equal(result.results[1].vulnerabilities.length,3);
+  }
+  for(const path of [undefined,'']) {
+    const missing=reviewedBuilder();missing.Results[1].Vulnerabilities[0].PkgPath=path;
+    assert.equal(assessTrivy(missing,'builder',exceptionPolicy).unapprovedHighCount,1);
+  }
+});
+
+test('exceptions require matching package discovery and cannot exempt OS findings or another occurrence',()=>{
+  for(const change of ['absent','version','name']) {
+    const report=reviewedBuilder(),pkg=report.Results[1].Packages.at(-1);
+    if(change==='absent')report.Results[1].Packages.pop();
+    if(change==='version')pkg.Version='6.29.1';
+    if(change==='name')pkg.Name='other-package';
+    assert.equal(assessTrivy(report,'builder',exceptionPolicy).approvedHighCount,0);
+  }
+  const os=reviewedBuilder();os.Results[0].Vulnerabilities=[structuredClone(os.Results[1].Vulnerabilities[0])];
+  assert.equal(assessTrivy(os,'builder',exceptionPolicy).blocked,true);
+  os.Results[0].Vulnerabilities[0].PkgPath='';os.Results[0].Vulnerabilities[0].Severity='LOW';
+  assert.equal(assessTrivy(os,'builder',exceptionPolicy).blocked,false,'OS findings do not require a Node.js package path');
+  const duplicate=reviewedBuilder();
+  duplicate.Results[1].Packages.push({Name:'undici',Version:'6.29.0',FilePath:'app/node_modules/undici/package.json'});
+  duplicate.Results[1].Vulnerabilities.push({...duplicate.Results[1].Vulnerabilities[0],PkgPath:'app/node_modules/undici/package.json'});
+  const result=assessTrivy(duplicate,'builder',exceptionPolicy);
+  assert.equal(result.approvedHighCount,3);assert.equal(result.unapprovedHighCount,1);assert.equal(result.blocked,true);
+});
+
+test('every builder CRITICAL or secret blocks even when all three HIGH exceptions match',()=>{
+  for(let index=0;index<3;index++) {
+    const report=reviewedBuilder();report.Results[1].Vulnerabilities[index].Severity='CRITICAL';
+    const result=assessTrivy(report,'builder',exceptionPolicy);
+    assert.equal(result.blocked,true);assert.equal(result.blockingVulnerabilities,1);assert.equal(result.approvedHighCount,2);
+    assert.equal(result.results[1].vulnerabilities[index].severity,'CRITICAL');
+    assert.equal(result.results[1].vulnerabilities[index].exception,undefined);
+  }
+  const report=reviewedBuilder();report.Results.push({Target:'/fixture',Class:'secret',Secrets:[{RuleID:'fixture',Severity:'LOW',Match:'never-disclose-exception-fixture'}]});
+  const result=assessTrivy(report,'builder',exceptionPolicy);
+  assert.equal(result.approvedHighCount,3);assert.equal(result.blocked,true);assert.equal(result.secrets,1);
+  assert.doesNotMatch(JSON.stringify(result),/never-disclose-exception-fixture/);
+});
+
+test('builder exceptions leave runtime decisions and report structure unchanged',()=>{
+  for(const entry of exceptionPolicy.exceptions)for(const Severity of ['HIGH','CRITICAL']) {
+    const report=runtime();report.Results[0].Vulnerabilities=[{VulnerabilityID:entry.cve,PkgName:entry.package,InstalledVersion:entry.version,PkgPath:entry.path,Severity}];
+    const result=assessTrivy(report,'runtime',exceptionPolicy);
+    assert.equal(result.blocked,true);assert.deepEqual(result,assessTrivy(report,'runtime'));
+    assert.equal(result.results[0].vulnerabilities[0].severity,Severity);
+  }
+  const report=runtime();report.Results.push({Target:'/fixture',Class:'secret',Secrets:[{RuleID:'fixture'}]});
+  assert.equal(assessTrivy(report,'runtime',exceptionPolicy).blocked,true);
+});
+
+test('missing review metadata, malformed policies, wildcards and duplicate exceptions fail closed',()=>{
+  const invalid=[null,{},[],{...exceptionPolicy,schemaVersion:2},{...exceptionPolicy,exceptions:{}},{...exceptionPolicy,unexpected:true}];
+  for(const change of [{cve:'*'},{package:'*'},{version:'6.*'},{path:'**/undici/package.json'},
+    {path:'/usr/local/lib/node_modules/npm/node_modules/undici/package.json'},
+    {path:'usr/local/../undici/package.json'},{rationale:''},{reviewReference:''},{reviewReference:123},{approved:true}]) {
+    invalid.push({...exceptionPolicy,exceptions:[{...exceptionPolicy.exceptions[0],...change}]});
+  }
+  const missing={...exceptionPolicy.exceptions[0]};delete missing.reviewReference;
+  invalid.push({...exceptionPolicy,exceptions:[missing]}, {...exceptionPolicy,exceptions:[exceptionPolicy.exceptions[0],exceptionPolicy.exceptions[0]]});
+  for(const policy of invalid)assert.throws(()=>assessTrivy(reviewedBuilder(),'builder',policy));
+  assert.equal(assessTrivy(reviewedBuilder(),'builder',{schemaVersion:1,exceptions:[]}).blocked,true);
+});
+
 test('image gate retains lower findings and rejects high/critical without filtering unfixed findings',()=>{
   for(const severity of ['LOW','MEDIUM','HIGH','CRITICAL']){
     const report=runtime();report.Results[0].Vulnerabilities=[{VulnerabilityID:'CVE-fixture',PkgName:'fixture',Severity:severity,InstalledVersion:'1',FixedVersion:'',Status:'affected'}];
@@ -108,6 +215,15 @@ test('actual CI command requires both image roles and propagates coverage, sever
     assert.equal(run().status,0);
     assert.equal(JSON.parse(await readFile(paths[1],'utf8')).blocked,false);
     assert.equal(JSON.parse(await readFile(paths[3],'utf8')).blocked,false);
+    await writeFile(paths[2],JSON.stringify(reviewedBuilder()));
+    assert.equal(run().status,0);
+    const reviewed=JSON.parse(await readFile(paths[3],'utf8'));
+    assert.equal(reviewed.approvedHighCount,3);assert.equal(reviewed.rawBlockingVulnerabilities,3);
+    assert.equal(reviewed.results[1].vulnerabilities.length,3);
+    for(const Severity of ['HIGH','CRITICAL']) {
+      const report=reviewedBuilder();report.Results[1].Vulnerabilities.push({VulnerabilityID:'CVE-2099-99999',PkgName:'fixture',Severity});
+      await writeFile(paths[2],JSON.stringify(report));assert.notEqual(run().status,0);
+    }
     for(const r of [{...builder(),Results:[]},runtime()]) {
       await writeFile(paths[2],JSON.stringify(r));assert.notEqual(run().status,0);
     }
@@ -122,8 +238,8 @@ test('actual CI command requires both image roles and propagates coverage, sever
   } finally {await rm(root,{recursive:true,force:true});}
 });
 test('npm audit gate includes development findings and preserves lower advisory counts',()=>{
-  for(const high of [0,1]){
-    const result=assessNpm({auditReportVersion:2,metadata:{vulnerabilities:{low:1,moderate:1,high,critical:0}},vulnerabilities:{fixture:{name:'fixture',isDirect:false,severity:high?'high':'moderate'}}});
-    assert.equal(result.blocked,high>0);assert.equal(result.counts.low,1);
+  for(const [high,critical] of [[0,0],[1,0],[0,1]]){
+    const result=assessNpm({auditReportVersion:2,metadata:{vulnerabilities:{low:1,moderate:1,high,critical}},vulnerabilities:{fixture:{name:'fixture',isDirect:false,severity:critical?'critical':high?'high':'moderate'}}});
+    assert.equal(result.blocked,high+critical>0);assert.equal(result.counts.low,1);
   }
 });
