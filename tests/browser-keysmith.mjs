@@ -1,4 +1,5 @@
 // Local-only UI regressions. Screenshots contain deterministic public fixtures.
+// Keep the historical suite identifier for CI/artifact compatibility; the UI is Zevyrn.
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {spawn} from 'node:child_process';
@@ -16,11 +17,13 @@ try{
  results.browser=browser.version();
  const context=await browser.newContext({viewport:{width:1280,height:1000},serviceWorkers:'block'});
  const requests=[],errors=[];
- const assets=new Set(['/','/theme.js','/styles.css','/app.js','/core.js','/dictionary.js','/profiles.js','/policy.js','/random-password.js','/profile-output.js']);
+ const assets=new Set(['/','/theme.js','/styles.css','/startup.js','/app.js','/core.js','/dictionary.js','/profiles.js','/policy.js','/random-password.js','/profile-output.js']);
+ const startupRequests=[];
  await context.route('**/*',route=>{
   const u=new URL(route.request().url());
   if(u.origin==='http://127.0.0.1:4173'&&u.pathname==='/favicon.ico')return route.fulfill({status:204});
   if(u.origin!=='http://127.0.0.1:4173'||!assets.has(u.pathname)||u.search||route.request().method()!=='GET'){requests.push('Unexpected request');return route.abort();}
+  if(u.pathname==='/startup.js')startupRequests.push(u.pathname);
   return route.continue();
  });
  await context.addInitScript(()=>{
@@ -32,6 +35,7 @@ try{
  });
  const page=await context.newPage();page.on('pageerror',()=>errors.push('Page error'));
  await page.goto('http://127.0.0.1:4173/',{waitUntil:'networkidle'});
+ assert.deepEqual(startupRequests,['/startup.js'],'The real application startup module must pass the local resource allowlist');
  assert.equal(await page.title(),'Zevyrn');
  assert.equal(await page.getByRole('link',{name:'Zevyrn home',exact:true}).count(),1);
  assert.equal(await page.locator('.brand svg').count(),1);
