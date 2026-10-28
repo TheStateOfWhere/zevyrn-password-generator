@@ -26,10 +26,10 @@ placement does not eliminate application, browser or dependency risks. See
 
 ## Install the prebuilt container (recommended)
 
-The planned release image is `ghcr.io/thestateofwhere/zevyrn:1.2.1`
-for **Linux/amd64**. **Release preparation: this image has not been published or
-verified in GHCR yet.** The commands below become usable after publication and
-verification; do not substitute an unverified third-party image.
+The qualified release image is `ghcr.io/thestateofwhere/zevyrn:1.2.1`
+for **Linux/amd64**. See the [v1.2.1 release](https://github.com/TheStateOfWhere/zevyrn-password-generator/releases/tag/v1.2.1)
+for publication status and the verified immutable digest. Use the commands below
+only after publication and verification; do not substitute an unverified image.
 
 Use a maintained Docker Engine 28 or newer (or Docker Desktop in Linux-container
 mode) and Docker Compose v2 or newer with `--wait` and `--wait-timeout`. Git, Node.js, npm

@@ -1,4 +1,5 @@
-# Exact qualified image only. First publication requires protected owner risk approval.
+# Publication-only revision atop d358bb4; retained image bytes, no rebuild.
+# Qualified application source is QUALIFIED_SOURCE; GITHUB_SHA identifies workflow revision.
 name: Publish exact qualified Zevyrn 1.2.1 image
 on:
   workflow_dispatch:
@@ -10,7 +11,7 @@ on:
         default: inspect
         required: true
       draft_asset_id:
-        description: Numeric asset ID of qualified-runtime-v1.2.1.oci.tar in the draft release
+        description: Numeric asset ID of qualified-runtime-v1.2.1-d358bb4.oci.tar in the draft release
         type: string
         required: false
 permissions: {}
@@ -23,7 +24,7 @@ env:
     // Diagnostic only: fixed GET endpoints, no asset download or release/registry writes.
     const fs = require('node:fs');
     const API = 'https://api.github.com/repos/TheStateOfWhere/zevyrn-password-generator';
-    const EXPECTED = { id: 422212826, tag: 'v1.2.1', target: '8835de6664daefc3193fa1d989dd31659048b6f8' };
+    const EXPECTED = { id: 422212826, tag: 'v1.2.1', target: process.env.GITHUB_SHA };
     const report = { schema: 1, diagnosticOnly: true, executionSHA: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') ? process.env.GITHUB_SHA : null,
       expected: EXPECTED, pages: [], paginationComplete: false, totalReleases: null,
       matchingCount: null, matching: [], direct: null, failures: [] };
@@ -64,7 +65,7 @@ env:
         fs.mkdirSync('publication-evidence', { recursive: true });
         if (process.env.GITHUB_REPOSITORY !== 'TheStateOfWhere/zevyrn-password-generator' ||
             process.env.GITHUB_REF !== 'refs/heads/main' || process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
-            process.env.MODE !== 'inspect' || process.env.ASSET !== '670100979' ||
+            process.env.MODE !== 'inspect' || !/^[1-9][0-9]{0,19}$/.test(process.env.ASSET || '') ||
             !/^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') || !process.env.GH_TOKEN) throw failure('INVALID_DIAGNOSTIC_CONTEXT');
         const releases = [];
         try {
@@ -149,15 +150,16 @@ env:
     const POLICIES_URL = ENV_URL + '/deployment-branch-policies?per_page=100';
     const APPROVALS_URL = API + '/actions/runs/' + process.env.GITHUB_RUN_ID + '/approvals';
     const qualified = {
-      archive: 'be15221c6b6b9d171d210e7c0a4b12b149601484f305b198a23d6a820865db02',
-      index: 'sha256:fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e'
+      archive: 'b61d015067bfa555c4441fadbed989d84793ef03a0125734b0ead37660e6a664',
+      index: 'sha256:531e29a33793fb5809d0507c8502e49fd5c5533afb4ac8b94c317c42a426694c'
     };
     function approvalComment() {
       const decision = process.env.MODE === 'publish-first'
         ? 'I accept hidden-tag overwrite and external-writer risk for ghcr.io/thestateofwhere/zevyrn:1.2.1'
         : 'I approve publication only with proven tag absence for ghcr.io/thestateofwhere/zevyrn:1.2.1';
       return decision + '; run=' + process.env.GITHUB_RUN_ID + '; sha=' + process.env.GITHUB_SHA +
-        '; asset=' + process.env.ASSET + '; archive=' + qualified.archive + '; index=' + qualified.index;
+        '; asset=' + process.env.ASSET + '; archive=' + qualified.archive + '; index=' + qualified.index +
+        '; source=d358bb49cdf28ec278f7979e81fbd1fc36a35031; tree=4075a1ba863ad9c52d97910604da021502db30a6; qualification=f97bfeae2f5c9a05828a088d89539d36bd75ee44e3e5bd6acef4817b91665516';
     }
     async function apiJSON(url, operation) {
       const response = await request(url, 'GET', 'Bearer ' + process.env.GH_TOKEN);
@@ -259,6 +261,7 @@ env:
             (process.env.CHECK_STAGE === 'immediate' && process.env.MODE === 'authorize')) stop('INVALID_PUBLICATION_CONTEXT');
         report.checkStage = process.env.CHECK_STAGE;
         report.mode = process.env.MODE;
+        if (Date.now() >= Date.parse('2026-10-28T19:17:44.708952Z') || Date.now() >= Date.parse('2026-11-03T16:43:17.817Z')) stop('QUALIFICATION_EVIDENCE_EXPIRED');
         await verifyProtection();
         report.stage = 'challenge';
         const challenge = await request(TARGET, 'HEAD');
@@ -343,11 +346,14 @@ env:
     }
     main();
   REPOSITORY: TheStateOfWhere/zevyrn-password-generator
+  QUALIFIED_SOURCE: d358bb49cdf28ec278f7979e81fbd1fc36a35031
+  QUALIFIED_TREE: 4075a1ba863ad9c52d97910604da021502db30a6
+  QUALIFICATION_MANIFEST: f97bfeae2f5c9a05828a088d89539d36bd75ee44e3e5bd6acef4817b91665516
   IMAGE: ghcr.io/thestateofwhere/zevyrn
-  INDEX: sha256:fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e
-  PLATFORM: sha256:75d744f9c4c10eeede58304cddff54530c08c9efccd0097ec24e5f074d7fa2f0
-  CONFIG: sha256:9b0d4db6534dbc82f96c0de4d71f318257716b936e17867f8595dd8fcc4e9dc8
-  ARCHIVE_SHA256: be15221c6b6b9d171d210e7c0a4b12b149601484f305b198a23d6a820865db02
+  INDEX: sha256:531e29a33793fb5809d0507c8502e49fd5c5533afb4ac8b94c317c42a426694c
+  PLATFORM: sha256:3c95080e5cc5870081f3dcb021ebcef727f77154d618850b9ded51fdc8de3aaa
+  CONFIG: sha256:9d595d153b21fd1eb43046a1c015617c62a216dde90aec0e38a7de78aa50fd55
+  ARCHIVE_SHA256: b61d015067bfa555c4441fadbed989d84793ef03a0125734b0ead37660e6a664
 jobs:
   guard:
     runs-on: ubuntu-24.04
@@ -414,6 +420,18 @@ jobs:
           set -euo pipefail
           [[ "$ASSET" =~ ^[1-9][0-9]{0,19}$ ]]
           mkdir publication-evidence
+          # Publication metadata revision; application source remains qualified.
+          gh api "repos/$REPOSITORY/compare/$QUALIFIED_SOURCE...$GITHUB_SHA" > "$RUNNER_TEMP/publication-revision.json"
+          node - <<'JS'
+          const fs = require('node:fs');
+          const c = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/publication-revision.json'));
+          if (c.base_commit?.sha !== process.env.QUALIFIED_SOURCE || c.merge_base_commit?.sha !== process.env.QUALIFIED_SOURCE ||
+              c.total_commits !== 1 || !Array.isArray(c.commits) || c.commits.length !== 1 || c.commits[0].sha !== process.env.GITHUB_SHA ||
+              !Array.isArray(c.files) || c.files.length !== 2 || c.files.some(f => f.status !== 'modified') ||
+              JSON.stringify(c.files.map(f => f.filename).sort()) !== JSON.stringify(['.github/workflows/publish-qualified-image.yml','README.md']))
+            throw Error('Publication revision must change only the workflow and README publication status atop qualified source');
+          JS
+          cp "$RUNNER_TEMP/publication-revision.json" publication-evidence/publication-revision.json
           # Authenticated listing includes visible drafts; every page is required.
           gh api "repos/$REPOSITORY/releases?per_page=100" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' --paginate --slurp > "$RUNNER_TEMP/releases.json"
           node -e "$DRAFT_LOOKUP_JS"
@@ -421,20 +439,20 @@ jobs:
           jq -e --arg sha "$GITHUB_SHA" '.draft == true and .tag_name == "v1.2.1" and .target_commitish == $sha' publication-evidence/draft.json
           gh api "repos/$REPOSITORY/releases/$(jq -r .id publication-evidence/draft.json)/assets" --paginate --slurp > "$RUNNER_TEMP/assets.json"
           jq --argjson id "$ASSET" '[.[][] | select(.id == $id) | {id,name,state,size}]' "$RUNNER_TEMP/assets.json" > publication-evidence/assets.json
-          jq -e --argjson id "$ASSET" '[.[] | select(.id == $id and .name == "qualified-runtime-v1.2.1.oci.tar" and .state == "uploaded" and .size == 26021376)] | length == 1' publication-evidence/assets.json
+          jq -e --argjson id "$ASSET" '[.[] | select(.id == $id and .name == "qualified-runtime-v1.2.1-d358bb4.oci.tar" and .state == "uploaded" and .size == 26027008)] | length == 1' publication-evidence/assets.json
           gh api "repos/$REPOSITORY/releases/assets/$ASSET" -H 'Accept: application/octet-stream' > "$RUNNER_TEMP/runtime.tar"
           printf '%s  %s\n' "$ARCHIVE_SHA256" "$RUNNER_TEMP/runtime.tar" | sha256sum --check --strict
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
           python3 - <<'PY'
           import hashlib,json,os,pathlib,tarfile
           expected={
-            'fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e',
-            '75d744f9c4c10eeede58304cddff54530c08c9efccd0097ec24e5f074d7fa2f0',
-            '9b0d4db6534dbc82f96c0de4d71f318257716b936e17867f8595dd8fcc4e9dc8',
-            '29ac8db0bd7aaa9fc7f42286275adca7f48e84fe41ba60f1f084f02428d89b84',
-            '3fe0a757ca1a92de24d2351c588e603520456e237755e976f0eb3a879530b83c',
+            '531e29a33793fb5809d0507c8502e49fd5c5533afb4ac8b94c317c42a426694c',
+            '3c95080e5cc5870081f3dcb021ebcef727f77154d618850b9ded51fdc8de3aaa',
+            '9d595d153b21fd1eb43046a1c015617c62a216dde90aec0e38a7de78aa50fd55',
+            'b1268989a602c3357000d7768e1a72a4dd10ae4964d0f06039d91b64b01b2001',
+            'd5876ee7944b207e6c2707cd88ed246e3dac0426ebb23384565cba540e481eb1',
             '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
-            'dffeab4431af0afa5e2dd1d461c8efee89df74a3335ba030a764889d5e06667d'}
+            'cb16d1d17774da73b19858db2edf7bbf68c1d7fa986abb0a015a17a8c117ae38'}
           with tarfile.open(pathlib.Path(os.environ['RUNNER_TEMP'])/'runtime.tar') as t:
             rows={}
             for h in expected:
@@ -446,8 +464,9 @@ jobs:
               rows[h]=len(b)
             config=json.load(t.extractfile('blobs/sha256/'+os.environ['CONFIG'][7:]))
             if (config['os'],config['architecture'],config['config']['User'])!=('linux','amd64','10001:10001'):raise ValueError('Runtime platform/user')
-            if config['rootfs']['diff_ids']!=['sha256:d4e43179edd35bbb1e6b56b7c1028beb8c75bd11042819be97a6a43989f747d1']:raise ValueError('Runtime filesystem')
-          pathlib.Path('publication-evidence/archive-verification.json').write_text(json.dumps({'archiveSHA256':os.environ['ARCHIVE_SHA256'],'index':os.environ['INDEX'],'platform':os.environ['PLATFORM'],'config':os.environ['CONFIG'],'sourceManifest':'3fe846fe9808eebec37bfa79bec2a66b235a54552049a760b548bd805a929dec','blobs':rows,'releaseCommit':os.environ['GITHUB_SHA']},indent=2)+'\n')
+            if config['config']['Labels'].get('io.zevyrn.source-commit')!=os.environ['QUALIFIED_SOURCE']:raise ValueError('Qualified source label')
+            if config['rootfs']['diff_ids']!=['sha256:309fe8173bde909cb928d0e76d408f36853297e3a5a9cae289516f9c885e46d0']:raise ValueError('Runtime filesystem')
+          pathlib.Path('publication-evidence/archive-verification.json').write_text(json.dumps({'archiveSHA256':os.environ['ARCHIVE_SHA256'],'index':os.environ['INDEX'],'platform':os.environ['PLATFORM'],'config':os.environ['CONFIG'],'sourceManifest':'a1f41c69670590673a2138fc98a4f6dbbe67599e1e598b7b0fa62402edb28a51','blobs':rows,'qualifiedSource':os.environ['QUALIFIED_SOURCE'],'qualifiedTree':os.environ['QUALIFIED_TREE'],'qualificationManifest':os.environ['QUALIFICATION_MANIFEST'],'publicationRevision':os.environ['GITHUB_SHA']},indent=2)+'\n')
           PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
         if: always()
@@ -573,11 +592,11 @@ jobs:
           skopeo copy --all --preserve-digests --src-no-creds --digestfile publication-evidence/anonymous-index-digest.txt "docker://$IMAGE@$INDEX" "oci:$RUNNER_TEMP/anonymous-zevyrn:qualified"
           test "$(cat publication-evidence/anonymous-index-digest.txt)" = "$INDEX"
           # Authenticate all fetched manifests, config, attestations and layer blobs.
-          for hash in fe4721455807c1f1532c60b9457ecda962630fd54417002809fdd5db8553ae6e 75d744f9c4c10eeede58304cddff54530c08c9efccd0097ec24e5f074d7fa2f0 9b0d4db6534dbc82f96c0de4d71f318257716b936e17867f8595dd8fcc4e9dc8 29ac8db0bd7aaa9fc7f42286275adca7f48e84fe41ba60f1f084f02428d89b84 3fe0a757ca1a92de24d2351c588e603520456e237755e976f0eb3a879530b83c 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a dffeab4431af0afa5e2dd1d461c8efee89df74a3335ba030a764889d5e06667d; do
+          for hash in 531e29a33793fb5809d0507c8502e49fd5c5533afb4ac8b94c317c42a426694c 3c95080e5cc5870081f3dcb021ebcef727f77154d618850b9ded51fdc8de3aaa 9d595d153b21fd1eb43046a1c015617c62a216dde90aec0e38a7de78aa50fd55 b1268989a602c3357000d7768e1a72a4dd10ae4964d0f06039d91b64b01b2001 d5876ee7944b207e6c2707cd88ed246e3dac0426ebb23384565cba540e481eb1 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a cb16d1d17774da73b19858db2edf7bbf68c1d7fa986abb0a015a17a8c117ae38; do
             printf '%s  %s\n' "$hash" "$RUNNER_TEMP/anonymous-zevyrn/blobs/sha256/$hash" | sha256sum --check --strict
           done
           cp "$RUNNER_TEMP/anonymous-zevyrn/blobs/sha256/${CONFIG#sha256:}" publication-evidence/runtime-config.json
-          jq -e '.os == "linux" and .architecture == "amd64" and .config.User == "10001:10001" and .config.ExposedPorts == {"8080/tcp":{}} and .config.Entrypoint == ["nginx"] and .rootfs.diff_ids == ["sha256:d4e43179edd35bbb1e6b56b7c1028beb8c75bd11042819be97a6a43989f747d1"]' publication-evidence/runtime-config.json
+          jq -e '.os == "linux" and .architecture == "amd64" and .config.User == "10001:10001" and .config.ExposedPorts == {"8080/tcp":{}} and .config.Entrypoint == ["nginx"] and .config.Labels["io.zevyrn.source-commit"] == "d358bb49cdf28ec278f7979e81fbd1fc36a35031" and .rootfs.diff_ids == ["sha256:309fe8173bde909cb928d0e76d408f36853297e3a5a9cae289516f9c885e46d0"]' publication-evidence/runtime-config.json
           printf 'Anonymous exact-image verification PASS: `%s@%s`, platform `%s`, config `%s`. No container was started or deployed.\n' "$IMAGE" "$INDEX" "$PLATFORM" "$CONFIG" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # reviewed v7.0.2
         if: always()
