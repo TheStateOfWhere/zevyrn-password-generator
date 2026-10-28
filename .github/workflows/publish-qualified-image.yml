@@ -418,12 +418,12 @@ jobs:
           mkdir publication-evidence
           # Publication metadata revision; application source remains qualified.
           gh api "repos/$REPOSITORY/compare/$QUALIFIED_SOURCE...$GITHUB_SHA" > "$RUNNER_TEMP/publication-revision.json"
-          gh api "repos/$REPOSITORY/compare/a9a34d9e1f677e9e50b5f27e76484c9c38b62600...$GITHUB_SHA" > "$RUNNER_TEMP/publication-repair.json"
+          gh api "repos/$REPOSITORY/compare/8186c7915cd3c66663f8a5de33673de9f1608905...$GITHUB_SHA" > "$RUNNER_TEMP/publication-repair.json"
           node - <<'JS'
           const fs = require('node:fs');
           const c = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/publication-revision.json'));
           const repair = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/publication-repair.json'));
-          const parent = 'a9a34d9e1f677e9e50b5f27e76484c9c38b62600';
+          const parent = '8186c7915cd3c66663f8a5de33673de9f1608905';
           if (repair.base_commit?.sha !== parent || repair.merge_base_commit?.sha !== parent ||
               repair.total_commits !== 1 || !Array.isArray(repair.commits) || repair.commits.length !== 1 ||
               repair.commits[0].sha !== process.env.GITHUB_SHA || repair.commits[0].parents?.length !== 1 ||
@@ -431,7 +431,8 @@ jobs:
               repair.files[0].filename !== '.github/workflows/publish-qualified-image.yml' || repair.files[0].status !== 'modified')
             throw Error('Publication repair must change only the workflow directly atop the reviewed publication commit');
           if (c.base_commit?.sha !== process.env.QUALIFIED_SOURCE || c.merge_base_commit?.sha !== process.env.QUALIFIED_SOURCE ||
-              c.total_commits !== 2 || !Array.isArray(c.commits) || c.commits.length !== 2 || c.commits[0].sha !== parent || c.commits[1].sha !== process.env.GITHUB_SHA ||
+              c.total_commits !== 3 || !Array.isArray(c.commits) || c.commits.length !== 3 ||
+              c.commits[0].sha !== 'a9a34d9e1f677e9e50b5f27e76484c9c38b62600' || c.commits[1].sha !== parent || c.commits[2].sha !== process.env.GITHUB_SHA ||
               !Array.isArray(c.files) || c.files.length !== 2 || c.files.some(f => f.status !== 'modified') ||
               JSON.stringify(c.files.map(f => f.filename).sort()) !== JSON.stringify(['.github/workflows/publish-qualified-image.yml','README.md']))
             throw Error('Publication chain must preserve the reviewed workflow and README separation from qualified source');
@@ -514,7 +515,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
+      # This job independently downloads the private draft asset; GitHub requires push access.
+      contents: write
       packages: write
       actions: read
     steps:
