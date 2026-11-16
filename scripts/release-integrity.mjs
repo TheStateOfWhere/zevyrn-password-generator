@@ -5,6 +5,7 @@ import {readFileSync} from 'node:fs';
 import {resolve,relative,sep} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
+import {gunzipSync} from 'node:zlib';
 import {pathToFileURL} from 'node:url';
 export const repository='TheStateOfWhere/zevyrn-password-generator';
 export const repositoryId=1421770645;
@@ -25,6 +26,26 @@ const codes=new Set(['OCI_LAYOUT_INVALID','OCI_RUNTIME_DESCRIPTOR_INVALID','OCI_
 function stage(code,operation){try{return operation();}catch(error){if(failureCodes.has(error))throw error;const failure=new Error();failureCodes.set(failure,code);throw failure;}}
 export const diagnosticCode=error=>failureCodes.get(error)??'RELEASE_INTEGRITY_UNEXPECTED';
 export function inspectionDiagnostic(code){assert(code==='OK'||codes.has(code));return {schemaVersion:1,promotionEligible:false,stage:'archive-inspection',result:code==='OK'?'success':'failure',code};}
+for(const code of ['SCAN_ARCHIVE_INVALID','RUNTIME_SCAN_FAILED','SBOM_GENERATION_FAILED'])codes.add(code);
+export function sanitizedFailureStages(input){
+  const result={};for(const name of ['archive','scanArchive','security','sbom','hardening']){
+    const outcome=input?.[name];assert(['success','failure','skipped','cancelled'].includes(outcome));result[name]=outcome;
+  }
+  return result;
+}
+export function sanitizedScannerMetadata(input){
+  if(!input)return null;
+  assert(input.Version==='0.76.0'&&input.VulnerabilityDB?.Version===2);
+  const db={Version:2};for(const name of ['UpdatedAt','DownloadedAt','NextUpdate']){const value=input.VulnerabilityDB[name];assert(typeof value==='string'&&/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(value)&&Number.isFinite(Date.parse(value)));db[name]=value;}
+  return {Version:input.Version,VulnerabilityDB:db};
+}
+export function sanitizedScanSummary(input){
+  if(!input)return null;assert(typeof input.blocked==='boolean');const result={blocked:input.blocked};
+  for(const name of ['blockingVulnerabilities','secrets','approvedHighCount','unapprovedHighCount']){
+    if(Object.hasOwn(input,name)){assert(Number.isSafeInteger(input[name])&&input[name]>=0);result[name]=input[name];}
+  }
+  assert(Object.hasOwn(result,'blockingVulnerabilities')&&Object.hasOwn(result,'secrets'));return result;
+}
 export function sanitizedToolIdentity(buildx,buildkit,image){
   const version=/\bv\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\b/;
   return {buildxVersion:buildx.match(/^github\.com\/docker\/buildx\s+(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\b/)?.[1]??null,
@@ -162,9 +183,46 @@ export async function verifyRetainedAssets(directory,identity){
   const expected=json(bytes),actual=await assetSnapshot(resolve(directory,'assets'));same(actual.files,expected);return expected;
 }
 export function verifyLoaded(identity,image) {
+  validateConfig(identity.config,identity.sourceCommit);
+  sha(identity.configDigest);assert(image.Id===identity.configDigest,'Loaded image ID mismatch');
   assert(image.Os==='linux'&&image.Architecture==='amd64');same(image.RootFS.Layers,identity.diffIDs);
   for(const key of ['User','WorkingDir','StopSignal','Entrypoint','Cmd','ExposedPorts','Env','Labels'])same(image.Config[key],identity.config.config[key]);
   for(const key of ['Test','Interval','Timeout','StartPeriod','Retries'])same(image.Config.Healthcheck[key],identity.config.config.Healthcheck[key]);
+}
+export function inspectDockerGraph(read,names,identity){
+  const seen=new Set();for(const name of names){const path=name.endsWith('/')?name.slice(0,-1):name;safeAssetPath(path);assert(!seen.has(name));seen.add(name);}
+  const manifests=json(read('manifest.json'));assert(Array.isArray(manifests)&&manifests.length===1);
+  const manifest=manifests[0];safeAssetPath(manifest.Config);assert(seen.has(manifest.Config));
+  const bytes=read(manifest.Config);assert('sha256:'+hash(bytes)===identity.configDigest);
+  const config=json(bytes);same(config,identity.config);validateConfig(config,identity.sourceCommit);
+  assert(Array.isArray(manifest.Layers)&&manifest.Layers.length===identity.diffIDs.length&&new Set(manifest.Layers).size===manifest.Layers.length);
+  const diffIDs=manifest.Layers.map(path=>{safeAssetPath(path);assert(seen.has(path));const layer=read(path);return 'sha256:'+hash(layer[0]===0x1f&&layer[1]===0x8b?gunzipSync(layer):layer);});
+  same(diffIDs,identity.diffIDs);same(config.rootfs.diff_ids,diffIDs);return identity.configDigest;
+}
+export async function inspectDockerArchive(path,identity){
+  const names=run('tar',['-tf',path]).toString().trim().split(/\r?\n/);
+  inspectDockerGraph(name=>run('tar',['-xOf',path,name]),names,identity);return hash(await readFile(path));
+}
+export function validateScanIdentity(identity,scan){
+  for(const key of ['sourceCommit','sourceTree','archiveSHA256','indexDigest','configDigest','diffIDs'])same(scan[key],identity[key]);
+  sha(scan.configDigest);assert(hex.test(scan.scanArchiveSHA256));
+}
+export function validateRuntimeReportIdentity(identity,report){
+  assert(report.SchemaVersion===2&&report.ArtifactType==='container_image');
+  assert(report.Metadata?.ImageID===identity.configDigest);same(report.Metadata.DiffIDs,identity.diffIDs);
+}
+export function validateSBOMIdentity(identity,sbom){
+  assert(sbom.bomFormat==='CycloneDX'&&sbom.components?.length>0);
+  const properties=sbom.metadata?.component?.properties;
+  const ids=properties?.filter(p=>p.name==='aquasecurity:trivy:ImageID');assert(ids?.length===1&&ids[0].value===identity.configDigest);
+  same(properties.filter(p=>p.name==='aquasecurity:trivy:DiffID').map(p=>p.value),identity.diffIDs);
+}
+export function runtimeScanArgs(input,output,sbom=false){
+  return ['image','--input',input,...(sbom?['--format','cyclonedx']:['--scanners','vuln,secret','--image-config-scanners','secret','--format','json']),'--output',output];
+}
+export function validateCompleteScanEvidence(identity,scan,sbom){
+  validateScanIdentity(identity,scan);assert(scan.runtimeImageID===identity.configDigest&&scan.sbomImageID===identity.configDigest);
+  same(scan.scanners,['vuln','secret']);same(scan.imageConfigScanners,['secret']);validateSBOMIdentity(identity,sbom);
 }
 export function verifyContainer(c) {
   const h=c.HostConfig;assert(c.Config.User==='10001:10001'&&c.State.Running);
@@ -192,7 +250,8 @@ export function validateEvidence(identity,evidence,context) {
   assert(identity.version===version&&hex.test(identity.archiveSHA256));commit(identity.sourceCommit);commit(identity.sourceTree);
   assert(Number.isFinite(context.startedAt)&&context.startedAt>0,'Missing qualification start time');
   assert(identity.sourceCommit===context.sourceCommit&&identity.sourceTree===context.sourceTree);
-  const {browser,health,runtime,builder,builderIdentity,scanner,sbom,npm}=evidence;
+  const {browser,health,runtime,builder,builderIdentity,scanner,sbom,npm,scanIdentity}=evidence;
+  validateCompleteScanEvidence(identity,scanIdentity,sbom);
   assert(context.purpose==='release'?context.pullRequest===null:context.purpose==='pr'&&Number.isSafeInteger(context.pullRequest)&&context.pullRequest>0);
   same(browser.purpose,context.purpose);same(browser.pullRequest,context.pullRequest);
   assert(browser.runId===context.runId&&browser.runAttempt===context.runAttempt&&browser.sourceCommit===identity.sourceCommit&&browser.sourceTree===identity.sourceTree);
@@ -251,7 +310,7 @@ const context=()=>{
   if(process.env.QUALIFICATION_KIND){assert(identity.purpose===process.env.QUALIFICATION_KIND&&identity.sourceCommit===process.env.QUALIFICATION_SOURCE);}
   return {...identity,runId:Number(process.env.GITHUB_RUN_ID),runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),sourceTree:run('git',['rev-parse','HEAD^{tree}']).toString().trim(),startedAt:Date.parse(process.env.QUALIFICATION_STARTED_AT)};
 };
-const requiredFiles=['archive.oci.tar','identity.json','assets.json','browser-results.json','health.json','runtime-scan.json','builder-scan.json','builder-identity.json','scanner-version.json','runtime-sbom.cdx.json','npm-audit.json','build-metadata.json','quality-run.json','quality-jobs.json'];
+const requiredFiles=['archive.oci.tar','identity.json','assets.json','browser-results.json','health.json','runtime-scan.json','runtime-scan-identity.json','builder-scan.json','builder-identity.json','scanner-version.json','runtime-sbom.cdx.json','npm-audit.json','build-metadata.json','quality-run.json','quality-jobs.json'];
 export function validatePacketPurpose(seal,expected) {
   assert(['pr','release'].includes(expected.purpose));same(seal.purpose,expected.purpose);same(seal.context.purpose,expected.purpose);same(seal.context.pullRequest,expected.pullRequest);
   same(seal.promotionEligible,expected.purpose==='release');
@@ -271,7 +330,7 @@ export async function verifyPacket(directory,expected) {
   const identity=await readJSON(resolve(directory,'identity.json'));
   same(await inspectArchive(resolve(directory,'archive.oci.tar'),expected.sourceCommit),Object.fromEntries(Object.entries(identity).filter(([k])=>!['sourceTree','assetsSHA256'].includes(k))));
   await verifyRetainedAssets(directory,identity);
-  const evidence={};for(const [name,file] of Object.entries({browser:'browser-results.json',health:'health.json',runtime:'runtime-scan.json',builder:'builder-scan.json',builderIdentity:'builder-identity.json',scanner:'scanner-version.json',sbom:'runtime-sbom.cdx.json',npm:'npm-audit.json'}))evidence[name]=await readJSON(resolve(directory,file));
+  const evidence={};for(const [name,file] of Object.entries({browser:'browser-results.json',health:'health.json',runtime:'runtime-scan.json',scanIdentity:'runtime-scan-identity.json',builder:'builder-scan.json',builderIdentity:'builder-identity.json',scanner:'scanner-version.json',sbom:'runtime-sbom.cdx.json',npm:'npm-audit.json'}))evidence[name]=await readJSON(resolve(directory,file));
   validateEvidence(identity,evidence,seal.context);same(seal.archiveSHA256,identity.archiveSHA256);same(seal.indexDigest,identity.indexDigest);
   validateQuality(await readJSON(resolve(directory,'quality-run.json')),await readJSON(resolve(directory,'quality-jobs.json')),expected.sourceCommit,seal.context);
   return {identity,seal};
@@ -282,6 +341,24 @@ async function main() {
     const ctx=context();
     assert(process.env.GITHUB_OUTPUT);
     await writeFile(process.env.GITHUB_OUTPUT,`purpose=${ctx.purpose}\nsource_commit=${ctx.sourceCommit}\nquality_event=${ctx.qualityEvent}\nquality_branch=${ctx.qualityBranch}\n`,{flag:'a'});
+  }
+  else if(mode==='prepare-scan'){
+    const identity=await readJSON(args[0]);commit(identity.sourceCommit);commit(identity.sourceTree);sha(identity.configDigest);
+    stage('SCAN_ARCHIVE_INVALID',()=>{const image=json(run('docker',['image','inspect',identity.configDigest]));assert(image.length===1);verifyLoaded(identity,image[0]);run('docker',['image','save','--output',args[1],identity.configDigest]);});
+    const scanArchiveSHA256=await inspectDockerArchive(args[1],identity);
+    const record=Object.fromEntries(['sourceCommit','sourceTree','archiveSHA256','indexDigest','configDigest','diffIDs'].map(key=>[key,identity[key]]));
+    await writeJSON(args[2],{...record,scanArchiveSHA256});
+  }
+  else if(mode==='scan-runtime'||mode==='sbom-runtime'){
+    const [scanner,identityFile,archive,recordFile,output]=args,identity=await readJSON(identityFile),record=await readJSON(recordFile);
+    validateScanIdentity(identity,record);assert(await inspectDockerArchive(archive,identity)===record.scanArchiveSHA256);
+    const sbom=mode==='sbom-runtime';if(sbom)assert(record.runtimeImageID===identity.configDigest);
+    stage(sbom?'SBOM_GENERATION_FAILED':'RUNTIME_SCAN_FAILED',()=>run(scanner,runtimeScanArgs(archive,output,sbom)));
+    assert(hash(await readFile(archive))===record.scanArchiveSHA256,'Scan archive changed');
+    const report=await readJSON(output);
+    if(sbom){validateSBOMIdentity(identity,report);record.sbomImageID=identity.configDigest;}
+    else{validateRuntimeReportIdentity(identity,report);record.runtimeImageID=identity.configDigest;record.scanners=['vuln','secret'];record.imageConfigScanners=['secret'];}
+    await writeJSON(recordFile,record);
   }
   else if(mode==='inspect'){
     let code='OK';
@@ -297,7 +374,14 @@ async function main() {
     const archive=await safeRead(args[0]),metadata=await safeRead(args[1]),temp=process.env.RUNNER_TEMP;
     let indexDigest=null;try{const value=json(metadata)['containerimage.digest'];if(digest.test(value))indexDigest=value;}catch{}
     const text=async name=>(await safeRead(resolve(temp,name)))?.toString()??'';
-    await writeJSON(args[2],{schemaVersion:1,promotionEligible:false,archiveSHA256:archive?hash(archive):null,indexDigest,indexDigestVerified:false,
+    let stages=null,scanner=null;try{if(process.env.DIAGNOSTIC_STAGES)stages=sanitizedFailureStages(JSON.parse(process.env.DIAGNOSTIC_STAGES));}catch{}
+    try{scanner=sanitizedScannerMetadata(json(await safeRead(resolve(args[0],'..','scanner-version.json'))));}catch{}
+    const scanArchive=await safeRead(resolve(temp,'runtime-scan.tar'));
+    let runtimeConfigDigest=null;try{const value=json(await safeRead(resolve(args[0],'..','identity.json'))).configDigest;if(digest.test(value))runtimeConfigDigest=value;}catch{}
+    const summaries={};for(const role of ['runtime','builder']){try{summaries[role]=sanitizedScanSummary(json(await safeRead(resolve(args[0],'..',role+'-scan.json'))));}catch{summaries[role]=null;}}
+    const stageCodes={archive:'ARCHIVE_STAGE_FAILED',scanArchive:'SCAN_ARCHIVE_STAGE_FAILED',security:'SECURITY_STAGE_FAILED',sbom:'SBOM_STAGE_FAILED',hardening:'HARDENING_STAGE_FAILED'};
+    const failures=Object.entries(stages??{}).filter(([,outcome])=>outcome==='failure').map(([name])=>stageCodes[name]);
+    await writeJSON(args[2],{schemaVersion:1,promotionEligible:false,archiveSHA256:archive?hash(archive):null,scanArchiveSHA256:scanArchive?hash(scanArchive):null,indexDigest,indexDigestVerified:false,runtimeConfigDigest,stages,failures,scanner,summaries,
       ...sanitizedToolIdentity(await text('release-buildx.txt'),await text('release-buildkit.txt'),await text('release-buildkit-image.txt'))});
   }
   else if(mode==='assets'){

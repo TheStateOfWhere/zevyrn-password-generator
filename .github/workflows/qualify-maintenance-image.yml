@@ -111,22 +111,14 @@ jobs:
           mkdir artifacts/release/packet/assets
           docker cp zevyrn-release-assets:/usr/share/nginx/html/. artifacts/release/packet/assets/
           node scripts/release-integrity.mjs assets artifacts/release/packet dist
-      - name: Collect sanitized failed-archive diagnostics
-        if: ${{ failure() && steps.archive.conclusion == 'failure' }}
+      - name: Prepare verified Docker-save scan archive from immutable runtime ID
+        id: scan_archive
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts/release/diagnostics
-          node scripts/release-integrity.mjs diagnostics artifacts/release/packet/archive.oci.tar artifacts/release/packet/build-metadata.json artifacts/release/diagnostics/archive.json
-      - name: Retain non-promotable failure diagnostics only
-        if: ${{ failure() && steps.archive.conclusion == 'failure' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: zevyrn-v1.2.2-failed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/release/diagnostics/*.json
-          if-no-files-found: error
-          retention-days: 7
-      - name: Fresh builder and exact archive security scans and SBOM
+          node scripts/release-integrity.mjs prepare-scan artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json
+      - name: Fresh builder and verified runtime security scans
+        id: security
         shell: bash
         run: |
           set -euo pipefail
@@ -136,17 +128,25 @@ jobs:
           export TRIVY_CACHE_DIR="$RUNNER_TEMP/trivy-cache"
           "$RUNNER_TEMP/trivy" image --download-db-only
           "$RUNNER_TEMP/trivy" version --format json > artifacts/release/packet/scanner-version.json
-          "$RUNNER_TEMP/trivy" image --input artifacts/release/packet/archive.oci.tar --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/runtime-raw.json"
+          node scripts/release-integrity.mjs scan-runtime "$RUNNER_TEMP/trivy" artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json "$RUNNER_TEMP/runtime-raw.json"
           "$RUNNER_TEMP/trivy" image --input "$RUNNER_TEMP/builder.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/builder-raw.json"
           node scripts/ci-security.mjs trivy "$RUNNER_TEMP/runtime-raw.json" artifacts/release/packet/runtime-scan.json "$RUNNER_TEMP/builder-raw.json" artifacts/release/packet/builder-scan.json
           sha256sum "$RUNNER_TEMP/builder.tar" | cut -d ' ' -f 1 > "$RUNNER_TEMP/builder.sha256"
           node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises";const p="artifacts/release/packet/",i=JSON.parse(await readFile(p+"identity.json")),b=JSON.parse(await readFile(process.env.RUNNER_TEMP+"/builder-raw.json"));await writeFile(p+"builder-identity.json",JSON.stringify({sourceCommit:i.sourceCommit,sourceTree:i.sourceTree,imageID:b.Metadata.ImageID,archiveSHA256:(await readFile(process.env.RUNNER_TEMP+"/builder.sha256","utf8")).trim()},null,2)+"\n");'
-          "$RUNNER_TEMP/trivy" image --input artifacts/release/packet/archive.oci.tar --format cyclonedx --output artifacts/release/packet/runtime-sbom.cdx.json
+      - name: Generate runtime SBOM from the same verified scan archive
+        id: sbom
+        shell: bash
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          set -euo pipefail
+          node scripts/release-integrity.mjs sbom-runtime "$RUNNER_TEMP/trivy" artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json artifacts/release/packet/runtime-sbom.cdx.json
       - name: Hardened execution of the image derived from the archive
+        id: hardening
         shell: bash
         run: |
           set -euo pipefail
-          docker run -d --name zevyrn-release-health --network none --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 128m --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 zevyrn-release-runtime:1.2.2
+          docker run -d --name zevyrn-release-health --network none --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 128m --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 "$(jq -r .configDigest artifacts/release/packet/identity.json)"
           docker inspect zevyrn-release-health > "$RUNNER_TEMP/container.json"
           node scripts/release-integrity.mjs container "$RUNNER_TEMP/container.json"
           for attempt in $(seq 1 30); do
@@ -172,6 +172,24 @@ jobs:
           path: artifacts/release/packet/
           if-no-files-found: error
           retention-days: 14
+      - name: Collect sanitized failed-archive diagnostics
+        if: ${{ failure() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}
+        shell: bash
+        env:
+          DIAGNOSTIC_STAGES: >-
+            {"archive":"${{ steps.archive.outcome }}","scanArchive":"${{ steps.scan_archive.outcome }}","security":"${{ steps.security.outcome }}","sbom":"${{ steps.sbom.outcome }}","hardening":"${{ steps.hardening.outcome }}"}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/release/diagnostics
+          node scripts/release-integrity.mjs diagnostics artifacts/release/packet/archive.oci.tar artifacts/release/packet/build-metadata.json artifacts/release/diagnostics/archive.json
+      - name: Retain non-promotable failure diagnostics only
+        if: ${{ failure() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zevyrn-v1.2.2-failed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release/diagnostics/*.json
+          if-no-files-found: error
+          retention-days: 7
   browser:
     needs: runtime
     runs-on: windows-2025

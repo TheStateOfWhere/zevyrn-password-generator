@@ -67,6 +67,14 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run" > "$RUNNER_TEMP/quality-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/quality-jobs.json"
           node scripts/release-integrity.mjs quality "$RUNNER_TEMP/quality-run.json" "$RUNNER_TEMP/quality-jobs.json"
+      - name: Prepare verified Docker-save archive without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          skopeo copy --override-os linux --override-arch amd64 oci-archive:validated/packet/archive.oci.tar docker-daemon:zevyrn-promotion-scan:1.2.2
+          node scripts/release-integrity.mjs prepare-scan validated/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" validated/promotion-scan-identity.json
       - name: Fresh runtime scan without repository or registry write privileges
         shell: bash
         run: |
@@ -77,7 +85,7 @@ jobs:
           export TRIVY_CACHE_DIR="$RUNNER_TEMP/trivy-cache"
           "$RUNNER_TEMP/trivy" image --download-db-only
           "$RUNNER_TEMP/trivy" version --format json > validated/promotion-scanner-version.json
-          "$RUNNER_TEMP/trivy" image --input validated/packet/archive.oci.tar --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/runtime-raw.json"
+          node scripts/release-integrity.mjs scan-runtime "$RUNNER_TEMP/trivy" validated/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" validated/promotion-scan-identity.json "$RUNNER_TEMP/runtime-raw.json"
           node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises";import {assessTrivy} from "./scripts/ci-security.mjs";const result=assessTrivy(JSON.parse(await readFile(process.env.RUNNER_TEMP+"/runtime-raw.json","utf8")),"runtime");await writeFile("validated/promotion-runtime-scan.json",JSON.stringify(result,null,2)+"\n");if(result.blocked)process.exitCode=1;'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

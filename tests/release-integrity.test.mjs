@@ -1,10 +1,12 @@
 import {test} from 'node:test';
+import {gzipSync} from 'node:zlib';
+import {createRequire} from 'node:module';
 import {spawnSync} from 'node:child_process';
-import {mkdtempSync,writeFileSync,readFileSync,mkdirSync,renameSync,symlinkSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync,existsSync,mkdirSync,renameSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {hash,assetSnapshot,validateRuntimeAssets,verifyRetainedAssets,nginxAssetSHA256,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
+import {hash,inspectDockerGraph,inspectDockerArchive,validateScanIdentity,validateRuntimeReportIdentity,validateSBOMIdentity,validateCompleteScanEvidence,runtimeScanArgs,sanitizedFailureStages,sanitizedScannerMetadata,sanitizedScanSummary,assetSnapshot,validateRuntimeAssets,verifyRetainedAssets,nginxAssetSHA256,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
 const nginxPage=`<!DOCTYPE html>
@@ -151,7 +153,7 @@ test('CLI diagnostic evidence contains only archive hash, validated index digest
   for(const name of ['release-buildx.txt','release-buildkit.txt','release-buildkit-image.txt'])writeFileSync(join(directory,name),'TOKEN=fixture-secret');
   const result=spawnSync(process.execPath,['scripts/release-integrity.mjs','diagnostics',archive,metadata,output],{env:{...process.env,RUNNER_TEMP:directory},encoding:'utf8'});
   assert.equal(result.status,0);assert.equal(result.stdout,'');assert.equal(result.stderr,'');
-  assert.deepEqual(JSON.parse(readFileSync(output)),{schemaVersion:1,promotionEligible:false,archiveSHA256:hash(Buffer.from('synthetic archive fixture')),indexDigest:sha,indexDigestVerified:false,buildxVersion:null,buildkitVersion:null,buildkitImageID:null});
+  assert.deepEqual(JSON.parse(readFileSync(output)),{schemaVersion:1,promotionEligible:false,archiveSHA256:hash(Buffer.from('synthetic archive fixture')),indexDigest:sha,indexDigestVerified:false,runtimeConfigDigest:null,stages:null,failures:[],scanner:null,summaries:{runtime:null,builder:null},scanArchiveSHA256:null,buildxVersion:null,buildkitVersion:null,buildkitImageID:null});
   writeFileSync(metadata,JSON.stringify({'containerimage.digest':'TOKEN=fixture-secret'}));
   const malformed=spawnSync(process.execPath,['scripts/release-integrity.mjs','diagnostics',join(directory,'missing'),metadata,output],{env:{...process.env,RUNNER_TEMP:directory},encoding:'utf8'});
   assert.equal(malformed.status,0);const sanitized=JSON.parse(readFileSync(output));assert.equal(sanitized.archiveSHA256,null);assert.equal(sanitized.indexDigest,null);
@@ -165,12 +167,77 @@ test('qualification selects the immutable artifact from the exact successful sou
 test('qualification rejects wrong repository, workflow, source, branch, event, status, conclusion and stale runs',()=>{for(const change of [f=>f.run.repository.id++,f=>f.run.head_repository.id++,f=>f.run.path='.github/workflows/other.yml',f=>f.run.head_sha='d'.repeat(40),f=>f.run.head_branch='other',f=>f.run.event='pull_request',f=>f.run.status='in_progress',f=>f.run.conclusion='failure',f=>f.run.created_at=new Date(now-86400001).toISOString()]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
 test('qualification rejects every unsuccessful, skipped, missing, duplicate or previous-attempt required job',()=>{for(let i=0;i<3;i++)for(const change of [j=>j.conclusion='failure',j=>j.conclusion='skipped',j=>j.status='in_progress',j=>j.run_attempt=1,j=>j.run_id=41]){const f=runFixture();change(f.jobs.jobs[i]);assert.throws(()=>assess(f));}for(const change of [f=>f.jobs.jobs.pop(),f=>f.jobs.jobs[2]=clone(f.jobs.jobs[0])]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
 test('qualification rejects expired, duplicate, foreign, wrong-attempt and unauthenticated artifacts',()=>{for(const change of [f=>f.artifacts.artifacts[0].expired=true,f=>f.artifacts.artifacts[0].name='zevyrn-v1.2.2-qualified-42-1',f=>f.artifacts.artifacts[0].digest='invalid',f=>f.artifacts.artifacts[0].workflow_run.head_sha='d'.repeat(40),f=>f.artifacts.artifacts[0].workflow_run.repository_id++,f=>f.artifacts.artifacts[0].created_at=new Date(now-86400000).toISOString(),f=>{f.artifacts.artifacts.push(clone(f.artifacts.artifacts[0]));f.artifacts.total_count++;}]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
-function evidenceFixture(){const identity={version:'1.2.2',sourceCommit:source,sourceTree:tree,archiveSHA256:'c'.repeat(64),indexDigest:sha,assetsSHA256:'d'.repeat(64)};const context={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main',runId:42,runAttempt:2,sourceCommit:source,sourceTree:tree,startedAt:now-600000};const evidence={browser:{...context,archiveSHA256:identity.archiveSHA256,indexDigest:sha,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))},health:{archiveSHA256:identity.archiveSHA256,indexDigest:sha,passed:true,checks:['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']},runtime:{blocked:false,blockingVulnerabilities:0,secrets:0,results:[]},builder:{blocked:false,blockingVulnerabilities:0,secrets:0,approvedHighCount:3,unapprovedHighCount:0},builderIdentity:{sourceCommit:source,sourceTree:tree,imageID:sha,archiveSHA256:"f".repeat(64)},npm:{blocked:false,counts:{high:0,critical:0}},scanner:{Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(now-600000).toISOString(),DownloadedAt:new Date(now).toISOString(),NextUpdate:new Date(now+86400000).toISOString()}},sbom:{bomFormat:'CycloneDX',components:[{name:'nginx'}]}};return {identity,context,evidence};}
+function evidenceFixture(){const identity={version:'1.2.2',sourceCommit:source,sourceTree:tree,archiveSHA256:'c'.repeat(64),indexDigest:sha,assetsSHA256:'d'.repeat(64),configDigest:sha,diffIDs:[sha]};const context={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main',runId:42,runAttempt:2,sourceCommit:source,sourceTree:tree,startedAt:now-600000};const evidence={browser:{...context,archiveSHA256:identity.archiveSHA256,indexDigest:sha,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))},health:{archiveSHA256:identity.archiveSHA256,indexDigest:sha,passed:true,checks:['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']},runtime:{blocked:false,blockingVulnerabilities:0,secrets:0,results:[]},builder:{blocked:false,blockingVulnerabilities:0,secrets:0,approvedHighCount:3,unapprovedHighCount:0},builderIdentity:{sourceCommit:source,sourceTree:tree,imageID:sha,archiveSHA256:"f".repeat(64)},npm:{blocked:false,counts:{high:0,critical:0}},scanner:{Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(now-600000).toISOString(),DownloadedAt:new Date(now).toISOString(),NextUpdate:new Date(now+86400000).toISOString()}},sbom:{bomFormat:'CycloneDX',metadata:{component:{properties:[{name:'aquasecurity:trivy:ImageID',value:sha},{name:'aquasecurity:trivy:DiffID',value:sha}]}},components:[{name:'nginx'}]},scanIdentity:{...identity,scanArchiveSHA256:'e'.repeat(64),runtimeImageID:sha,sbomImageID:sha,scanners:['vuln','secret'],imageConfigScanners:['secret']}};return {identity,context,evidence};}
 const evidenceCheck=f=>validateEvidence(f.identity,f.evidence,f.context);
 test('qualification evidence accepts exact archive/source/assets with all required results',()=>{evidenceCheck(evidenceFixture());});
 test('qualification evidence rejects mismatched archives, source, assets, failed browser/runtime, missing SBOM and unsafe scans',()=>{for(const change of [f=>f.evidence.browser.archiveSHA256='e'.repeat(64),f=>f.evidence.browser.sourceTree='e'.repeat(40),f=>f.evidence.browser.assetsSHA256='e'.repeat(64),f=>f.evidence.browser.suites[0].conclusion='failure',f=>f.evidence.browser.suites.pop(),f=>f.evidence.health.passed=false,f=>f.evidence.health.checks.pop(),f=>f.evidence.runtime.blocked=true,f=>f.evidence.builder.secrets=1,f=>f.evidence.builder.unapprovedHighCount=1,f=>f.evidence.builderIdentity.sourceCommit=tree,f=>f.context.startedAt=null,f=>f.evidence.runtime.results=[{vulnerabilities:[{id:'CVE-2026-107891',severity:'MEDIUM'}]}],f=>delete f.evidence.sbom,f=>delete f.evidence.scanner.VulnerabilityDB,f=>f.evidence.scanner.Version='other',f=>f.evidence.scanner.VulnerabilityDB.DownloadedAt=new Date(now-86400000).toISOString()]){const f=evidenceFixture();change(f);assert.throws(()=>evidenceCheck(f));}});
-test('derived Docker image must preserve exact rootfs and execution configuration',()=>{const identity={config:config(),diffIDs:[sha]},image={Os:'linux',Architecture:'amd64',Config:clone(identity.config.config),RootFS:{Layers:[sha]}};verifyLoaded(identity,image);for(const change of [i=>i.RootFS.Layers=[sha256Other()],i=>i.Config.Env.push('UNEXPECTED=1'),i=>i.Config.User='0']){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(identity,i));}});
+test('derived Docker image must preserve exact rootfs and execution configuration',()=>{const identity={sourceCommit:source,configDigest:sha,config:config(),diffIDs:[sha]},image={Id:sha,Os:'linux',Architecture:'amd64',Config:clone(identity.config.config),RootFS:{Layers:[sha]}};verifyLoaded(identity,image);for(const change of [i=>i.RootFS.Layers=[sha256Other()],i=>i.Config.Env.push('UNEXPECTED=1'),i=>i.Config.User='0']){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(identity,i));}});
 function sha256Other(){return 'sha256:'+'d'.repeat(64);}
+function dockerFixture(compressed=false){
+  const layer=Buffer.from('synthetic layer bytes'),c=config();c.rootfs.diff_ids=['sha256:'+hash(layer)];c.history=[{created_by:'COPY runtime fixture',empty_layer:false}];
+  const bytes=Buffer.from(JSON.stringify(c)),identity={sourceCommit:source,sourceTree:tree,archiveSHA256:'e'.repeat(64),indexDigest:sha,configDigest:'sha256:'+hash(bytes),config:c,diffIDs:c.rootfs.diff_ids};
+  const files=new Map([['manifest.json',Buffer.from(JSON.stringify([{Config:'config.json',RepoTags:null,Layers:['layer.tar']}]))],['config.json',bytes],['layer.tar',compressed?gzipSync(layer):layer]]);
+  return {identity,files,check:()=>inspectDockerGraph(name=>{assert(files.has(name));return files.get(name);},[...files.keys()],identity)};
+}
+test('Docker-save verification binds exact configuration/history and plain or gzip layer identities',()=>{
+  for(const compressed of [false,true]){const f=dockerFixture(compressed);assert.equal(f.check(),f.identity.configDigest);const image={Id:f.identity.configDigest,Os:'linux',Architecture:'amd64',Config:clone(f.identity.config.config),RootFS:{Layers:f.identity.diffIDs}};verifyLoaded(f.identity,image);}
+});
+test('loaded image binding rejects tag-only selection, wrong ID, config digest, platform and diff IDs',()=>{
+  const f=dockerFixture(),image={Id:f.identity.configDigest,Os:'linux',Architecture:'amd64',Config:clone(f.identity.config.config),RootFS:{Layers:f.identity.diffIDs}};
+  for(const change of [i=>i.Id='zevyrn-release-runtime:1.2.2',i=>i.Id=sha,i=>i.Architecture='arm64',i=>i.Os='windows',i=>i.RootFS.Layers=[sha],i=>i.Config.User='0',i=>i.Config.Labels['org.opencontainers.image.revision']=tree]){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(f.identity,i));}
+  assert.throws(()=>verifyLoaded({...f.identity,configDigest:sha},image));
+});
+test('Docker-save verification rejects changed config/history, layers, unsafe references and multiple images',()=>{
+  for(const change of [f=>f.files.set('config.json',Buffer.from('{}')),f=>{const c=clone(f.identity.config);c.history[0].created_by='changed';f.files.set('config.json',Buffer.from(JSON.stringify(c)));},
+    f=>f.files.set('layer.tar',Buffer.from('modified layer bytes')),f=>f.identity.diffIDs=[sha],
+    f=>f.files.set('manifest.json',Buffer.from(JSON.stringify([{Config:'../escape',Layers:['layer.tar']}]))),
+    f=>f.files.set('manifest.json',Buffer.from(JSON.stringify([{Config:'config.json',Layers:['layer.tar']},{Config:'config.json',Layers:['layer.tar']}]))),
+    f=>f.files.set('manifest.json',Buffer.from(JSON.stringify([{Config:'config.json',Layers:[]}])))] ) {const f=dockerFixture();change(f);assert.throws(f.check);}
+});
+test('scan evidence binds original OCI, source, immutable image, derived archive, report and SBOM',()=>{
+  const f=evidenceFixture();validateCompleteScanEvidence(f.identity,f.evidence.scanIdentity,f.evidence.sbom);
+  validateRuntimeReportIdentity(f.identity,{SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:sha,DiffIDs:[sha]}});
+  for(const key of ['sourceCommit','sourceTree','archiveSHA256','indexDigest','configDigest','diffIDs','scanArchiveSHA256','runtimeImageID','sbomImageID','scanners','imageConfigScanners']){
+    const scan=clone(f.evidence.scanIdentity);delete scan[key];assert.throws(()=>validateCompleteScanEvidence(f.identity,scan,f.evidence.sbom));
+  }
+  for(const report of [{},{SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:sha256Other(),DiffIDs:[sha]}},{SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:sha,DiffIDs:[sha256Other()]}}])assert.throws(()=>validateRuntimeReportIdentity(f.identity,report));
+  const sbom=clone(f.evidence.sbom);sbom.metadata.component.properties[0].value=sha256Other();assert.throws(()=>validateSBOMIdentity(f.identity,sbom));
+});
+test('runtime command construction always enables vulnerability, file-secret and configuration-secret scanners',()=>{
+  assert.deepEqual(runtimeScanArgs('/scan.tar','/report.json'),['image','--input','/scan.tar','--scanners','vuln,secret','--image-config-scanners','secret','--format','json','--output','/report.json']);
+  assert.deepEqual(runtimeScanArgs('/scan.tar','/sbom.json',true),['image','--input','/scan.tar','--format','cyclonedx','--output','/sbom.json']);
+  const f=evidenceFixture();for(const change of [s=>s.scanners=['vuln'],s=>s.imageConfigScanners=[],s=>s.runtimeImageID=sha256Other(),s=>s.sbomImageID=sha256Other()]){const scan=clone(f.evidence.scanIdentity);change(scan);assert.throws(()=>validateCompleteScanEvidence(f.identity,scan,f.evidence.sbom));}
+});
+test('CLI scan initialization failure blocks and modified Docker-save archives never reach the scanner',async()=>{
+  const f=dockerFixture(),root=mkdtempSync(join(tmpdir(),'zevyrn-scan-archive-'));for(const [name,bytes] of f.files)writeFileSync(join(root,name),bytes);
+  const archive=join(root,'scan.tar'),tar=spawnSync('tar',['-cf',archive,'-C',root,...f.files.keys()],{encoding:'utf8'});assert.equal(tar.status,0);
+  const scanArchiveSHA256=await inspectDockerArchive(archive,f.identity),record={...f.identity,scanArchiveSHA256};
+  const identityFile=join(root,'identity.json'),recordFile=join(root,'scan.json');writeFileSync(identityFile,JSON.stringify(f.identity));writeFileSync(recordFile,JSON.stringify(record));
+  const result=spawnSync(process.execPath,['scripts/release-integrity.mjs','scan-runtime',process.execPath,identityFile,archive,recordFile,join(root,'report.json')],{encoding:'utf8'});
+  assert.equal(result.status,1);assert.equal(result.stdout,'');assert.equal(result.stderr.trim(),'RUNTIME_SCAN_FAILED');assert(!JSON.parse(readFileSync(recordFile)).runtimeImageID);
+  writeFileSync(archive,Buffer.from('modified archive TOKEN=fixture-secret'));await assert.rejects(inspectDockerArchive(archive,f.identity));
+  const modified=spawnSync(process.execPath,['scripts/release-integrity.mjs','scan-runtime','TOKEN=fixture-secret',identityFile,archive,recordFile,join(root,'report.json')],{encoding:'utf8'});assert.equal(modified.status,1);assert.equal(modified.stdout,'');assert(!modified.stderr.includes('fixture-secret'));
+});
+test('failure metadata contains only fixed stage outcomes and pinned scanner/database fields',()=>{
+  const stages={archive:'success',scanArchive:'success',security:'failure',sbom:'skipped',hardening:'skipped'};
+  assert.deepEqual(sanitizedFailureStages({...stages,secret:'TOKEN=fixture-secret'}),stages);
+  assert.throws(()=>sanitizedFailureStages({...stages,security:'TOKEN=fixture-secret'}));
+  const scanner=evidenceFixture().evidence.scanner;assert.deepEqual(sanitizedScannerMetadata({...scanner,secret:'TOKEN=fixture-secret'}),scanner);
+  assert.throws(()=>sanitizedScannerMetadata({...scanner,Version:'TOKEN=fixture-secret'}));
+  assert.deepEqual(sanitizedScanSummary({blocked:true,blockingVulnerabilities:1,secrets:0,results:[{secret:'TOKEN=fixture-secret'}]}),{blocked:true,blockingVulnerabilities:1,secrets:0});
+  assert.throws(()=>sanitizedScanSummary({blocked:true,blockingVulnerabilities:'TOKEN=fixture-secret',secrets:0}));
+});
+test('qualification and read-only publication validation scan verified derived archives and preserve guards',{skip:!existsSync('.github/workflows/qualify-maintenance-image.yml')&&'Workflow contracts execute on the source checkout, not inside Docker'},()=>{
+  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
+  for(const file of ['qualify-maintenance-image','publish-maintenance-image']){
+    const doc=yaml.parse(readFileSync(`.github/workflows/${file}.yml`,'utf8'));const job=doc.jobs[file.startsWith('qualify')?'runtime':'validate'];const script=job.steps.map(s=>s.run??'').join('\n');
+    assert(script.includes('prepare-scan'));assert(script.includes('scan-runtime'));assert(script.includes('$RUNNER_TEMP/runtime-scan.tar'));assert(!/trivy" image --input .*archive\.oci\.tar/.test(script));
+    assert(script.includes('v0.76.0'));assert(script.includes('e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7'));assert(script.includes('--download-db-only'));
+    for(const step of job.steps)assert(!step['continue-on-error']);
+    if(file.startsWith('qualify')){assert(script.includes('sbom-runtime'));const collect=job.steps.findIndex(s=>s.name==='Collect sanitized failed-archive diagnostics'),hardening=job.steps.findIndex(s=>s.id==='hardening');assert(collect>hardening);assert(job.steps[collect].if.includes("steps.archive.outcome == 'success'"));const upload=job.steps.find(s=>s.with?.name?.startsWith('zevyrn-v1.2.2-failed-diagnostics-'));assert.equal(upload.with.path,'artifacts/release/diagnostics/*.json');assert.equal(upload.with['retention-days'],7);assert.deepEqual(doc.permissions,{contents:'read',actions:'read'});}
+    else{assert.deepEqual(job.permissions,{contents:'read',actions:'read'});assert.equal(doc.jobs.promote.environment,'zevyrn-ghcr-publication');}
+  }
+});
 test('container checks reject any loss of hardened execution settings',()=>{const c={Config:{User:'10001:10001'},State:{Running:true},HostConfig:{ReadonlyRootfs:true,Privileged:false,NetworkMode:'none',PidsLimit:128,Memory:134217728,CapDrop:['ALL'],CapAdd:null,SecurityOpt:['no-new-privileges'],Tmpfs:{'/tmp':'rw,noexec,nosuid,size=16m,mode=1777'}}};verifyContainer(c);for(const change of [x=>x.HostConfig.ReadonlyRootfs=false,x=>x.HostConfig.Privileged=true,x=>x.HostConfig.NetworkMode='default',x=>x.HostConfig.CapAdd=['SYS_ADMIN'],x=>x.HostConfig.SecurityOpt=[],x=>x.HostConfig.Tmpfs['/tmp']='rw',x=>x.Config.User='0']){const x=clone(c);change(x);assert.throws(()=>verifyContainer(x));}});
 test('documented Skopeo Repository/Tags response accepts an absent destination and existing historical tags',()=>{
   validateTags({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.1','1.1.0']});
