@@ -1,6 +1,7 @@
 // Small, version-specific validators. Artifact transport and orchestration use GitHub Actions.
 import assert from 'node:assert/strict';
 import {readFile,writeFile,readdir,lstat} from 'node:fs/promises';
+import {readFileSync} from 'node:fs';
 import {resolve,relative,sep} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -19,6 +20,22 @@ const json=bytes=>JSON.parse(bytes.toString());
 const same=(a,b)=>assert.deepEqual(a,b);
 const sha=value=>assert(digest.test(value),'Invalid digest');
 const commit=value=>assert(/^[0-9a-f]{40}$/.test(value),'Invalid commit/tree');
+export function qualificationIdentity(env,event,checkedOutCommit) {
+  assert(env.GITHUB_REPOSITORY===repository&&event.repository?.id===repositoryId);
+  commit(env.GITHUB_SHA);commit(checkedOutCommit);
+  if(env.GITHUB_EVENT_NAME==='pull_request'){
+    const pr=event.pull_request;
+    assert(Number.isSafeInteger(event.number)&&event.number>0&&pr?.number===event.number);
+    assert(env.GITHUB_REF===`refs/pull/${event.number}/merge`);
+    assert(pr.head?.repo?.id===repositoryId&&pr.base?.repo?.id===repositoryId&&pr.base.ref==='main');
+    commit(pr.head.sha);assert(checkedOutCommit===pr.head.sha,'Must check out the actual PR head');
+    assert(typeof pr.head.ref==='string'&&pr.head.ref.length>0&&!/[\x00-\x20\x7f]/.test(pr.head.ref));
+    return {purpose:'pr',sourceCommit:pr.head.sha,pullRequest:event.number,qualityEvent:'pull_request',qualityBranch:pr.head.ref};
+  }
+  assert(env.GITHUB_EVENT_NAME==='workflow_dispatch'&&env.GITHUB_REF==='refs/heads/main');
+  assert(event.inputs?.source_commit===env.GITHUB_SHA&&checkedOutCommit===env.GITHUB_SHA);
+  return {purpose:'release',sourceCommit:env.GITHUB_SHA,pullRequest:null,qualityEvent:'push',qualityBranch:'main'};
+}
 export function validateConfig(c,sourceCommit) {
   commit(sourceCommit);
   assert(c.os==='linux'&&c.architecture==='amd64');
@@ -106,6 +123,8 @@ export function validateEvidence(identity,evidence,context) {
   assert(Number.isFinite(context.startedAt)&&context.startedAt>0,'Missing qualification start time');
   assert(identity.sourceCommit===context.sourceCommit&&identity.sourceTree===context.sourceTree);
   const {browser,health,runtime,builder,builderIdentity,scanner,sbom,npm}=evidence;
+  assert(context.purpose==='release'?context.pullRequest===null:context.purpose==='pr'&&Number.isSafeInteger(context.pullRequest)&&context.pullRequest>0);
+  same(browser.purpose,context.purpose);same(browser.pullRequest,context.pullRequest);
   assert(browser.runId===context.runId&&browser.runAttempt===context.runAttempt&&browser.sourceCommit===identity.sourceCommit&&browser.sourceTree===identity.sourceTree);
   assert(browser.archiveSHA256===identity.archiveSHA256&&browser.indexDigest===identity.indexDigest&&browser.assetsSHA256===identity.assetsSHA256);
   same(browser.suites.map(s=>s.name),suites);assert(browser.suites.every(s=>s.conclusion==='success'));
@@ -122,25 +141,56 @@ export function validateEvidence(identity,evidence,context) {
   assert(Date.parse(scanner.VulnerabilityDB.DownloadedAt)>=context.startedAt&&Date.parse(scanner.VulnerabilityDB.UpdatedAt)<=Date.parse(scanner.VulnerabilityDB.DownloadedAt)+300000);
   assert(sbom.bomFormat==='CycloneDX'&&sbom.components?.length>0);
 }
-export function validateTags(response) {assert(response.name==='thestateofwhere/zevyrn'&&Array.isArray(response.Tags)&&response.Tags.every(t=>typeof t==='string'));assert(!response.Tags.includes(version),'Destination tag already exists');}
+export function validateTags(response) {
+  assert(response&&typeof response==='object'&&!Array.isArray(response));
+  same(Object.keys(response).sort(),['Repository','Tags']);
+  assert(response.Repository==='ghcr.io/thestateofwhere/zevyrn'&&Array.isArray(response.Tags));
+  assert(response.Tags.every(t=>typeof t==='string'&&/^[\w][\w.-]{0,127}$/.test(t)));
+  assert(new Set(response.Tags).size===response.Tags.length,'Duplicate registry tags');
+  assert(!response.Tags.includes(version),'Destination tag already exists');
+}
 export function validateReleaseRef(text,expected) {
   commit(expected);const refs=text.trim().split(/\r?\n/).map(line=>line.split(/\s+/));
   assert(refs.length>=1&&refs.length<=2);assert(refs.every(([sha,ref])=>/^[0-9a-f]{40}$/.test(sha)&&['refs/tags/v1.2.2','refs/tags/v1.2.2^{}'].includes(ref)));
   assert(refs.filter(([,ref])=>ref==='refs/tags/v1.2.2').length===1);
   const peeled=refs.filter(([,ref])=>ref==='refs/tags/v1.2.2^{}');assert(peeled.length<=1);assert((peeled[0]??refs[0])[0]===expected,'Release tag moved');
 }
-export function validateQuality(info,jobs,source) {
+export function validateQuality(info,jobs,source,qualification={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main'}) {
   assert(info.repository?.id===repositoryId&&info.head_repository?.id===repositoryId&&info.path==='.github/workflows/quality-security.yml');
-  assert(info.head_sha===source&&info.head_branch==='main'&&info.event==='push'&&info.status==='completed'&&info.conclusion==='success');
+  assert(info.head_sha===source&&info.status==='completed'&&info.conclusion==='success');
+  if(qualification.purpose==='pr'){
+    assert(qualification.qualityEvent==='pull_request'&&info.event==='pull_request'&&info.head_branch===qualification.qualityBranch);
+    assert(Number.isSafeInteger(qualification.pullRequest)&&qualification.pullRequest>0);
+    const matches=info.pull_requests?.filter(p=>p.number===qualification.pullRequest);
+    assert(matches?.length===1&&matches[0].head.sha===source&&matches[0].head.ref===qualification.qualityBranch&&matches[0].base.ref==='main');
+    assert(matches[0].head.repo.id===repositoryId&&matches[0].base.repo.id===repositoryId);
+  }else{
+    assert(qualification.purpose==='release'&&qualification.pullRequest===null&&qualification.qualityEvent==='push'&&qualification.qualityBranch==='main');
+    assert(info.head_branch==='main'&&info.event==='push');
+  }
   assert(jobs.total_count===2&&jobs.jobs.length===2);same(jobs.jobs.map(j=>j.name).sort(),['browser','quality-image']);
   assert(jobs.jobs.every(j=>j.run_id===info.id&&j.run_attempt===info.run_attempt&&j.status==='completed'&&j.conclusion==='success'));
 }
 const writeJSON=(path,value)=>writeFile(path,JSON.stringify(value,null,2)+'\n');
 const readJSON=async path=>json(await readFile(path));
-const context=()=>({runId:Number(process.env.GITHUB_RUN_ID),runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),sourceCommit:process.env.GITHUB_SHA,sourceTree:run('git',['rev-parse','HEAD^{tree}']).toString().trim(),startedAt:Date.parse(process.env.QUALIFICATION_STARTED_AT)});
+const context=()=>{
+  const checkedOut=run('git',['rev-parse','HEAD']).toString().trim();
+  const identity=process.env.QUALIFICATION_KIND
+    ?qualificationIdentity(process.env,json(readFileSync(process.env.GITHUB_EVENT_PATH)),checkedOut)
+    :{purpose:'release',sourceCommit:process.env.GITHUB_SHA,pullRequest:null,qualityEvent:'push',qualityBranch:'main'};
+  if(process.env.QUALIFICATION_KIND){assert(identity.purpose===process.env.QUALIFICATION_KIND&&identity.sourceCommit===process.env.QUALIFICATION_SOURCE);}
+  return {...identity,runId:Number(process.env.GITHUB_RUN_ID),runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),sourceTree:run('git',['rev-parse','HEAD^{tree}']).toString().trim(),startedAt:Date.parse(process.env.QUALIFICATION_STARTED_AT)};
+};
 const requiredFiles=['archive.oci.tar','identity.json','assets.json','browser-results.json','health.json','runtime-scan.json','builder-scan.json','builder-identity.json','scanner-version.json','runtime-sbom.cdx.json','npm-audit.json','build-metadata.json','quality-run.json','quality-jobs.json'];
+export function validatePacketPurpose(seal,expected) {
+  assert(['pr','release'].includes(expected.purpose));same(seal.purpose,expected.purpose);same(seal.context.purpose,expected.purpose);same(seal.context.pullRequest,expected.pullRequest);
+  same(seal.promotionEligible,expected.purpose==='release');
+  if(expected.purpose==='release')assert(expected.pullRequest===null&&seal.context.qualityEvent==='push'&&seal.context.qualityBranch==='main');
+  else assert(Number.isSafeInteger(expected.pullRequest)&&expected.pullRequest>0&&seal.context.qualityEvent==='pull_request');
+}
 export async function verifyPacket(directory,expected) {
   const seal=await readJSON(resolve(directory,'qualification.json'));assert(seal.schemaVersion===1&&seal.version===version&&seal.repositoryId===repositoryId);
+  validatePacketPurpose(seal,expected);
   same(seal.jobResults,{runtime:'success',browser:'success'});
   for(const key of ['sourceCommit','sourceTree','runId','runAttempt'])same(seal.context[key],expected[key]);
   assert(Number.isFinite(seal.context.startedAt)&&seal.context.startedAt>0);
@@ -154,12 +204,17 @@ export async function verifyPacket(directory,expected) {
   assert(identity.assetsSHA256===hash(await readFile(resolve(directory,'assets.json'))));
   const evidence={};for(const [name,file] of Object.entries({browser:'browser-results.json',health:'health.json',runtime:'runtime-scan.json',builder:'builder-scan.json',builderIdentity:'builder-identity.json',scanner:'scanner-version.json',sbom:'runtime-sbom.cdx.json',npm:'npm-audit.json'}))evidence[name]=await readJSON(resolve(directory,file));
   validateEvidence(identity,evidence,seal.context);same(seal.archiveSHA256,identity.archiveSHA256);same(seal.indexDigest,identity.indexDigest);
-  validateQuality(await readJSON(resolve(directory,'quality-run.json')),await readJSON(resolve(directory,'quality-jobs.json')),expected.sourceCommit);
+  validateQuality(await readJSON(resolve(directory,'quality-run.json')),await readJSON(resolve(directory,'quality-jobs.json')),expected.sourceCommit,seal.context);
   return {identity,seal};
 }
 async function main() {
   const [mode,...args]=process.argv.slice(2);
-  if(mode==='inspect')await writeJSON(args[1],await inspectArchive(args[0],process.env.GITHUB_SHA));
+  if(mode==='qualification-context'){
+    const ctx=context();
+    assert(process.env.GITHUB_OUTPUT);
+    await writeFile(process.env.GITHUB_OUTPUT,`purpose=${ctx.purpose}\nsource_commit=${ctx.sourceCommit}\nquality_event=${ctx.qualityEvent}\nquality_branch=${ctx.qualityBranch}\n`,{flag:'a'});
+  }
+  else if(mode==='inspect')await writeJSON(args[1],await inspectArchive(args[0],context().sourceCommit));
   else if(mode==='assets'){
     const directory=args[0],identity=await readJSON(resolve(directory,'identity.json'));
     await writeJSON(resolve(directory,'assets.json'),await snapshot(resolve(directory,'assets')));
@@ -181,18 +236,18 @@ async function main() {
   else if(mode==='seal'){
     assert(process.env.RUNTIME_RESULT==='success'&&process.env.BROWSER_RESULT==='success');
     const directory=args[0],identity=await readJSON(resolve(directory,'identity.json')),ctx=context();
-    await writeJSON(resolve(directory,'qualification.json'),{schemaVersion:1,version,repositoryId,context:ctx,jobResults:{runtime:process.env.RUNTIME_RESULT,browser:process.env.BROWSER_RESULT},archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,files:await snapshot(directory)});
+    await writeJSON(resolve(directory,'qualification.json'),{schemaVersion:1,version,repositoryId,purpose:ctx.purpose,promotionEligible:ctx.purpose==='release',context:ctx,jobResults:{runtime:process.env.RUNTIME_RESULT,browser:process.env.BROWSER_RESULT},archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,files:await snapshot(directory)});
     await verifyPacket(directory,ctx);
   } else if(mode==='verify-run'){
     const selected=validateRun(await readJSON(args[0]),await readJSON(args[1]),await readJSON(args[2]),process.env.GITHUB_SHA);
     assert(selected.runId===Number(process.env.QUALIFICATION_RUN),'Unexpected qualification run ID');
     await writeJSON(args[3],selected);if(process.env.GITHUB_OUTPUT)await writeFile(process.env.GITHUB_OUTPUT,`artifact_id=${selected.artifactId}\nartifact_digest=${selected.artifactDigest}\n`,{flag:'a'});
   } else if(mode==='verify-packet'){
-    const selected=await readJSON(args[1]);const result=await verifyPacket(args[0],{sourceCommit:process.env.GITHUB_SHA,sourceTree:context().sourceTree,runId:selected.runId,runAttempt:selected.runAttempt,startedAt:selected.startedAt,artifactCreatedAt:selected.artifactCreatedAt});
+    const selected=await readJSON(args[1]);const result=await verifyPacket(args[0],{purpose:'release',pullRequest:null,sourceCommit:process.env.GITHUB_SHA,sourceTree:context().sourceTree,runId:selected.runId,runAttempt:selected.runAttempt,startedAt:selected.startedAt,artifactCreatedAt:selected.artifactCreatedAt});
     if(process.env.GITHUB_OUTPUT)await writeFile(process.env.GITHUB_OUTPUT,`archive_sha256=${result.identity.archiveSHA256}\nindex_digest=${result.identity.indexDigest}\n`,{flag:'a'});
   } else if(mode==='tags')validateTags(await readJSON(args[0]));
   else if(mode==='release-ref')validateReleaseRef(run('git',['ls-remote','--exit-code','origin','refs/tags/v1.2.2','refs/tags/v1.2.2^{}']).toString(),process.env.GITHUB_SHA);
-  else if(mode==='quality')validateQuality(await readJSON(args[0]),await readJSON(args[1]),process.env.GITHUB_SHA);
+  else if(mode==='quality'){const ctx=context();validateQuality(await readJSON(args[0]),await readJSON(args[1]),ctx.sourceCommit,ctx);}
   else if(mode==='zip-members'){
     const names=run('unzip',['-Z1',args[0]]).toString().trim().split('\n');const seen=new Set();
     for(const name of names){const path=name.endsWith('/')?name.slice(0,-1):name;assert(/^[A-Za-z0-9._/-]+$/.test(path)&&!path.startsWith('/')&&!path.split('/').some(p=>p==='..'||p==='.'||p===''),'Unsafe ZIP member');assert(!seen.has(name));seen.add(name);}

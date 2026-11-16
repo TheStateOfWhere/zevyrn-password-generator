@@ -1,5 +1,8 @@
 name: Qualify Zevyrn v1.2.2 artifact
 on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       source_commit:
@@ -9,8 +12,12 @@ on:
 permissions:
   contents: read
   actions: read
+env:
+  QUALIFICATION_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+  QUALIFICATION_KIND: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+  QUALIFICATION_PREFIX: ${{ github.event_name == 'pull_request' && 'zevyrn-v1.2.2-pr' || 'zevyrn-v1.2.2' }}
 concurrency:
-  group: zevyrn-v1.2.2-qualification
+  group: zevyrn-v1.2.2-qualification-${{ github.event.pull_request.number || 'release' }}
   cancel-in-progress: false
 jobs:
   runtime:
@@ -19,31 +26,40 @@ jobs:
     outputs:
       started_at: ${{ steps.init.outputs.started_at }}
     env:
-      SOURCE_COMMIT: ${{ inputs.source_commit }}
       TRIVY_DISABLE_TELEMETRY: 'true'
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.1'
-      - name: Require exact v1.2.2 source on main
+      - name: Verify actual PR head or exact main release source
         id: init
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = 'TheStateOfWhere/zevyrn-password-generator'
-          test "$GITHUB_REF" = refs/heads/main
-          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          node scripts/release-integrity.mjs qualification-context
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE"
           test "$(node -p "require('./package.json').version")" = 1.2.2
           printf 'started_at=%s\n' "$(date --utc --iso-8601=seconds)" >> "$GITHUB_OUTPUT"
+      - name: Require matching successful source CI without a parallel-run race
+        shell: bash
+        env:
+          QUALITY_EVENT: ${{ steps.init.outputs.quality_event }}
+          QUALITY_BRANCH: ${{ steps.init.outputs.quality_branch }}
+        run: |
+          set -euo pipefail
           mkdir -p artifacts/release/packet
-          quality_run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow quality-security.yml --commit "$GITHUB_SHA" --event push --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
+          for attempt in $(seq 1 30); do
+            quality_run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow quality-security.yml --commit "$QUALIFICATION_SOURCE" --event "$QUALITY_EVENT" --branch "$QUALITY_BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [[ "$quality_run" =~ ^[1-9][0-9]*$ ]]; then break; fi
+            sleep 10
+          done
           [[ "$quality_run" =~ ^[1-9][0-9]*$ ]]
+          timeout 10m gh run watch "$quality_run" --repo "$GITHUB_REPOSITORY" --interval 10 --exit-status
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run" > artifacts/release/packet/quality-run.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run/jobs?filter=latest&per_page=100" > artifacts/release/packet/quality-jobs.json
           node scripts/release-integrity.mjs quality artifacts/release/packet/quality-run.json artifacts/release/packet/quality-jobs.json
@@ -79,7 +95,7 @@ jobs:
           docker build --platform linux/amd64 --target build -t zevyrn-release-builder .
           docker save -o "$RUNNER_TEMP/builder.tar" zevyrn-release-builder
           docker buildx create --name "zevyrn-release-$GITHUB_RUN_ID" --driver docker-container --use
-          docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$GITHUB_SHA" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag ghcr.io/thestateofwhere/zevyrn:1.2.2 --output type=oci,dest=artifacts/release/packet/archive.oci.tar --metadata-file artifacts/release/packet/build-metadata.json .
+          docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$QUALIFICATION_SOURCE" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag ghcr.io/thestateofwhere/zevyrn:1.2.2 --output type=oci,dest=artifacts/release/packet/archive.oci.tar --metadata-file artifacts/release/packet/build-metadata.json .
           node scripts/release-integrity.mjs inspect artifacts/release/packet/archive.oci.tar artifacts/release/packet/identity.json
           skopeo inspect --raw oci-archive:artifacts/release/packet/archive.oci.tar > "$RUNNER_TEMP/index.json"
           test "sha256:$(sha256sum "$RUNNER_TEMP/index.json" | cut -d ' ' -f 1)" = "$(jq -r .indexDigest artifacts/release/packet/identity.json)"
@@ -133,7 +149,7 @@ jobs:
           node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises"; const p="artifacts/release/packet/";const i=JSON.parse(await readFile(p+"identity.json"));await writeFile(p+"health.json",JSON.stringify({archiveSHA256:i.archiveSHA256,indexDigest:i.indexDigest,passed:true,checks:["image-config-and-rootfs","container-hardening","health","nginx-config","headers","assets","no-build-tools","graceful-stop"]},null,2)+"\n");'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zevyrn-v1.2.2-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.QUALIFICATION_PREFIX }}-runtime-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/release/packet/
           if-no-files-found: error
           retention-days: 14
@@ -147,12 +163,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.1'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: zevyrn-v1.2.2-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.QUALIFICATION_PREFIX }}-runtime-${{ github.run_id }}-${{ github.run_attempt }}
           path: packet
       - name: Verify archive and run all eight suites on its byte-identical assets
         shell: pwsh
@@ -169,7 +186,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zevyrn-v1.2.2-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.QUALIFICATION_PREFIX }}-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: packet/browser-results.json
           if-no-files-found: error
           retention-days: 14
@@ -185,22 +202,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.1'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: zevyrn-v1.2.2-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.QUALIFICATION_PREFIX }}-runtime-${{ github.run_id }}-${{ github.run_attempt }}
           path: packet
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: zevyrn-v1.2.2-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.QUALIFICATION_PREFIX }}-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: packet
       - name: Seal source, archive, assets and successful qualification evidence
         run: node scripts/release-integrity.mjs seal packet
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zevyrn-v1.2.2-qualified-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.QUALIFICATION_PREFIX }}-qualified-${{ github.run_id }}-${{ github.run_attempt }}
           path: packet/
           if-no-files-found: error
           retention-days: 14

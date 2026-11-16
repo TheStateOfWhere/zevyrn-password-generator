@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {hash,inspectGraph,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
+import {hash,inspectGraph,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
 const mt='application/vnd.oci.image.manifest.v1+json',it='application/vnd.oci.image.index.v1+json',ct='application/vnd.oci.image.config.v1+json';
@@ -29,13 +29,71 @@ test('qualification selects the immutable artifact from the exact successful sou
 test('qualification rejects wrong repository, workflow, source, branch, event, status, conclusion and stale runs',()=>{for(const change of [f=>f.run.repository.id++,f=>f.run.head_repository.id++,f=>f.run.path='.github/workflows/other.yml',f=>f.run.head_sha='d'.repeat(40),f=>f.run.head_branch='other',f=>f.run.event='pull_request',f=>f.run.status='in_progress',f=>f.run.conclusion='failure',f=>f.run.created_at=new Date(now-86400001).toISOString()]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
 test('qualification rejects every unsuccessful, skipped, missing, duplicate or previous-attempt required job',()=>{for(let i=0;i<3;i++)for(const change of [j=>j.conclusion='failure',j=>j.conclusion='skipped',j=>j.status='in_progress',j=>j.run_attempt=1,j=>j.run_id=41]){const f=runFixture();change(f.jobs.jobs[i]);assert.throws(()=>assess(f));}for(const change of [f=>f.jobs.jobs.pop(),f=>f.jobs.jobs[2]=clone(f.jobs.jobs[0])]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
 test('qualification rejects expired, duplicate, foreign, wrong-attempt and unauthenticated artifacts',()=>{for(const change of [f=>f.artifacts.artifacts[0].expired=true,f=>f.artifacts.artifacts[0].name='zevyrn-v1.2.2-qualified-42-1',f=>f.artifacts.artifacts[0].digest='invalid',f=>f.artifacts.artifacts[0].workflow_run.head_sha='d'.repeat(40),f=>f.artifacts.artifacts[0].workflow_run.repository_id++,f=>f.artifacts.artifacts[0].created_at=new Date(now-86400000).toISOString(),f=>{f.artifacts.artifacts.push(clone(f.artifacts.artifacts[0]));f.artifacts.total_count++;}]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
-function evidenceFixture(){const identity={version:'1.2.2',sourceCommit:source,sourceTree:tree,archiveSHA256:'c'.repeat(64),indexDigest:sha,assetsSHA256:'d'.repeat(64)};const context={runId:42,runAttempt:2,sourceCommit:source,sourceTree:tree,startedAt:now-600000};const evidence={browser:{...context,archiveSHA256:identity.archiveSHA256,indexDigest:sha,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))},health:{archiveSHA256:identity.archiveSHA256,indexDigest:sha,passed:true,checks:['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']},runtime:{blocked:false,blockingVulnerabilities:0,secrets:0,results:[]},builder:{blocked:false,blockingVulnerabilities:0,secrets:0,approvedHighCount:3,unapprovedHighCount:0},builderIdentity:{sourceCommit:source,sourceTree:tree,imageID:sha,archiveSHA256:"f".repeat(64)},npm:{blocked:false,counts:{high:0,critical:0}},scanner:{Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(now-600000).toISOString(),DownloadedAt:new Date(now).toISOString(),NextUpdate:new Date(now+86400000).toISOString()}},sbom:{bomFormat:'CycloneDX',components:[{name:'nginx'}]}};return {identity,context,evidence};}
+function evidenceFixture(){const identity={version:'1.2.2',sourceCommit:source,sourceTree:tree,archiveSHA256:'c'.repeat(64),indexDigest:sha,assetsSHA256:'d'.repeat(64)};const context={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main',runId:42,runAttempt:2,sourceCommit:source,sourceTree:tree,startedAt:now-600000};const evidence={browser:{...context,archiveSHA256:identity.archiveSHA256,indexDigest:sha,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))},health:{archiveSHA256:identity.archiveSHA256,indexDigest:sha,passed:true,checks:['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']},runtime:{blocked:false,blockingVulnerabilities:0,secrets:0,results:[]},builder:{blocked:false,blockingVulnerabilities:0,secrets:0,approvedHighCount:3,unapprovedHighCount:0},builderIdentity:{sourceCommit:source,sourceTree:tree,imageID:sha,archiveSHA256:"f".repeat(64)},npm:{blocked:false,counts:{high:0,critical:0}},scanner:{Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(now-600000).toISOString(),DownloadedAt:new Date(now).toISOString(),NextUpdate:new Date(now+86400000).toISOString()}},sbom:{bomFormat:'CycloneDX',components:[{name:'nginx'}]}};return {identity,context,evidence};}
 const evidenceCheck=f=>validateEvidence(f.identity,f.evidence,f.context);
 test('qualification evidence accepts exact archive/source/assets with all required results',()=>{evidenceCheck(evidenceFixture());});
 test('qualification evidence rejects mismatched archives, source, assets, failed browser/runtime, missing SBOM and unsafe scans',()=>{for(const change of [f=>f.evidence.browser.archiveSHA256='e'.repeat(64),f=>f.evidence.browser.sourceTree='e'.repeat(40),f=>f.evidence.browser.assetsSHA256='e'.repeat(64),f=>f.evidence.browser.suites[0].conclusion='failure',f=>f.evidence.browser.suites.pop(),f=>f.evidence.health.passed=false,f=>f.evidence.health.checks.pop(),f=>f.evidence.runtime.blocked=true,f=>f.evidence.builder.secrets=1,f=>f.evidence.builder.unapprovedHighCount=1,f=>f.evidence.builderIdentity.sourceCommit=tree,f=>f.context.startedAt=null,f=>f.evidence.runtime.results=[{vulnerabilities:[{id:'CVE-2026-107891',severity:'MEDIUM'}]}],f=>delete f.evidence.sbom,f=>delete f.evidence.scanner.VulnerabilityDB,f=>f.evidence.scanner.Version='other',f=>f.evidence.scanner.VulnerabilityDB.DownloadedAt=new Date(now-86400000).toISOString()]){const f=evidenceFixture();change(f);assert.throws(()=>evidenceCheck(f));}});
 test('derived Docker image must preserve exact rootfs and execution configuration',()=>{const identity={config:config(),diffIDs:[sha]},image={Os:'linux',Architecture:'amd64',Config:clone(identity.config.config),RootFS:{Layers:[sha]}};verifyLoaded(identity,image);for(const change of [i=>i.RootFS.Layers=[sha256Other()],i=>i.Config.Env.push('UNEXPECTED=1'),i=>i.Config.User='0']){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(identity,i));}});
 function sha256Other(){return 'sha256:'+'d'.repeat(64);}
 test('container checks reject any loss of hardened execution settings',()=>{const c={Config:{User:'10001:10001'},State:{Running:true},HostConfig:{ReadonlyRootfs:true,Privileged:false,NetworkMode:'none',PidsLimit:128,Memory:134217728,CapDrop:['ALL'],CapAdd:null,SecurityOpt:['no-new-privileges'],Tmpfs:{'/tmp':'rw,noexec,nosuid,size=16m,mode=1777'}}};verifyContainer(c);for(const change of [x=>x.HostConfig.ReadonlyRootfs=false,x=>x.HostConfig.Privileged=true,x=>x.HostConfig.NetworkMode='default',x=>x.HostConfig.CapAdd=['SYS_ADMIN'],x=>x.HostConfig.SecurityOpt=[],x=>x.HostConfig.Tmpfs['/tmp']='rw',x=>x.Config.User='0']){const x=clone(c);change(x);assert.throws(()=>verifyContainer(x));}});
-test('tag-list validation rejects an existing destination and every malformed schema',()=>{validateTags({name:'thestateofwhere/zevyrn',Tags:['1.2.1']});for(const tags of [null,{},[],{name:'wrong',Tags:[]},{name:'thestateofwhere/zevyrn',Tags:null},{name:'thestateofwhere/zevyrn',Tags:['1.2.2']},{name:'thestateofwhere/zevyrn',Tags:[null]}])assert.throws(()=>validateTags(tags));});
+test('documented Skopeo Repository/Tags response accepts an absent destination and existing historical tags',()=>{
+  validateTags({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.1','1.1.0']});
+  validateTags({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:[]});
+});
+test('Skopeo tag validation fails closed on wrong identity, missing fields, malformed tags or existing destination',()=>{
+  for(const response of [null,{},[],{name:'thestateofwhere/zevyrn',Tags:[]},{Tags:[]},{Repository:'ghcr.io/thestateofwhere/zevyrn'},
+    {Repository:'docker.io/thestateofwhere/zevyrn',Tags:[]},{Repository:'ghcr.io/other/zevyrn',Tags:[]},
+    {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:null},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:[null]},
+    {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['']},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['bad/tag']},
+    {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.1','1.2.1']},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.2']},
+    {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:[],unexpected:true}])assert.throws(()=>validateTags(response));
+});
+
 test('only the exact lightweight or peeled v1.2.2 release tag can authorize promotion',()=>{validateReleaseRef(source+'\trefs/tags/v1.2.2\n',source);validateReleaseRef(tree+'\trefs/tags/v1.2.2\n'+source+'\trefs/tags/v1.2.2^{}\n',source);for(const text of ['',source+'\trefs/tags/v1.2.1\n',tree+'\trefs/tags/v1.2.2\n',source+'\trefs/tags/v1.2.2\n'+source+'\trefs/tags/v1.2.2\n'])assert.throws(()=>validateReleaseRef(text,source));});
 test('existing source CI cannot be replaced by a skipped, failed, unrelated or prior-attempt job',()=>{const f=runFixture();f.run.path='.github/workflows/quality-security.yml';f.run.event='push';f.jobs.total_count=2;f.jobs.jobs=f.jobs.jobs.slice(0,2);f.jobs.jobs[0].name='quality-image';validateQuality(f.run,f.jobs,source);for(const change of [x=>x.run.head_sha=tree,x=>x.run.conclusion='failure',x=>x.jobs.jobs[1].conclusion='skipped',x=>x.jobs.jobs[1].run_attempt=1,x=>x.run.path='.github/workflows/other.yml']){const x=clone(f);change(x);assert.throws(()=>validateQuality(x.run,x.jobs,source));}});
+
+function prFixture(){return {env:{GITHUB_REPOSITORY:repository,GITHUB_EVENT_NAME:'pull_request',GITHUB_REF:'refs/pull/2/merge',GITHUB_SHA:tree},event:{repository:{id:repositoryId},number:2,pull_request:{number:2,head:{sha:source,ref:'codex/v1.2.2-security-maintenance',repo:{id:repositoryId}},base:{ref:'main',repo:{id:repositoryId}}}}};}
+test('automatic PR qualification binds actual checked-out head, never the synthetic merge SHA',()=>{
+  const f=prFixture(),identity=qualificationIdentity(f.env,f.event,source);
+  assert.equal(identity.sourceCommit,source);assert.notEqual(identity.sourceCommit,f.env.GITHUB_SHA);
+  assert.equal(identity.purpose,'pr');assert.equal(identity.pullRequest,2);assert.equal(identity.qualityEvent,'pull_request');
+  assert.throws(()=>qualificationIdentity(f.env,f.event,tree));
+});
+test('PR qualification rejects wrong repository, foreign heads, wrong base, ref, number and unsafe branch',()=>{
+  for(const change of [f=>f.env.GITHUB_REPOSITORY='other/repo',f=>f.event.repository.id++,f=>f.event.pull_request.head.repo.id++,
+    f=>f.event.pull_request.base.repo.id++,f=>f.event.pull_request.base.ref='other',f=>f.env.GITHUB_REF='refs/heads/main',
+    f=>f.event.number=3,f=>f.event.pull_request.head.sha=tree,f=>f.event.pull_request.head.ref='bad\nbranch']){
+    const f=prFixture();change(f);assert.throws(()=>qualificationIdentity(f.env,f.event,source));
+  }
+});
+test('release qualification still requires a fresh dispatch on exact main source',()=>{
+  const env={GITHUB_REPOSITORY:repository,GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:source};
+  const event={repository:{id:repositoryId},inputs:{source_commit:source}};
+  assert.equal(qualificationIdentity(env,event,source).purpose,'release');
+  assert.throws(()=>qualificationIdentity({...env,GITHUB_REF:'refs/heads/codex/test'},event,source));
+  assert.throws(()=>qualificationIdentity(env,{...event,inputs:{source_commit:tree}},source));
+  assert.throws(()=>qualificationIdentity(env,event,tree));
+});
+test('PR source CI requires the exact head and corresponding same-repository PR',()=>{
+  const f=runFixture(),q=qualificationIdentity(prFixture().env,prFixture().event,source);
+  f.run.path='.github/workflows/quality-security.yml';f.run.event='pull_request';f.run.head_branch=q.qualityBranch;
+  f.run.pull_requests=[{number:2,head:{sha:source,ref:q.qualityBranch,repo:{id:repositoryId}},base:{ref:'main',repo:{id:repositoryId}}}];
+  f.jobs.total_count=2;f.jobs.jobs=f.jobs.jobs.slice(0,2);f.jobs.jobs[0].name='quality-image';validateQuality(f.run,f.jobs,source,q);
+  assert.throws(()=>validateQuality(f.run,f.jobs,source));
+  for(const change of [x=>x.run.head_sha=tree,x=>x.run.pull_requests[0].number=3,x=>x.run.pull_requests[0].head.repo.id++,
+    x=>x.run.head_branch='other',x=>x.jobs.jobs[1].conclusion='skipped']){const x=clone(f);change(x);assert.throws(()=>validateQuality(x.run,x.jobs,source,q));}
+});
+test('successful PR runs and PR-named artifacts remain rejected by the promotion run validator',()=>{
+  const f=runFixture();f.run.event='pull_request';f.run.head_branch='codex/v1.2.2-security-maintenance';
+  f.artifacts.artifacts[0].name='zevyrn-v1.2.2-pr-qualified-42-2';assert.throws(()=>assess(f));
+  const other=runFixture();other.artifacts.artifacts[0].name='zevyrn-v1.2.2-pr-qualified-42-2';assert.throws(()=>assess(other));
+});
+test('PR packets are explicitly non-promotable even if their eligibility flag is tampered',()=>{
+  const expected={purpose:'pr',pullRequest:2},packet={purpose:'pr',promotionEligible:false,context:{purpose:'pr',pullRequest:2,qualityEvent:'pull_request',qualityBranch:'codex/v1.2.2-security-maintenance'}};
+  validatePacketPurpose(packet,expected);
+  assert.throws(()=>validatePacketPurpose(packet,{purpose:'release',pullRequest:null}));
+  assert.throws(()=>validatePacketPurpose({...packet,promotionEligible:true},expected));
+  const disguised={...packet,purpose:'release',promotionEligible:true,context:{...packet.context,purpose:'release',pullRequest:null}};
+  assert.throws(()=>validatePacketPurpose(disguised,{purpose:'release',pullRequest:null}));
+  validatePacketPurpose({purpose:'release',promotionEligible:true,context:{purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main'}},{purpose:'release',pullRequest:null});
+});
