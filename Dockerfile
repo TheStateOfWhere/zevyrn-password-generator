@@ -22,11 +22,14 @@ COPY examples ./examples
 RUN npm test
 
 FROM nginx:1.30.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5 AS runtime-rootfs
-# Upgrade only existing Alpine 3.24 runtime libraries requiring newer fixes.
-# Exact pins fail closed if unavailable; do not switch Alpine branches.
+# Upgrade only existing Alpine 3.24 runtime packages requiring newer fixes.
+# Minimum security versions allow newer fixes without changing Alpine branches.
 # Patch libx11 inherited through Nginx's retained image-filter dependencies.
 RUN apk add --no-cache --upgrade \
-      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0 brotli-libs=1.2.1-r0 curl=8.23.0-r0 libcurl=8.23.0-r0
+    'libexpat>=2.10.0-r0' 'zlib>=1.4-r0' \
+    'libx11>=1.8.14-r0' 'brotli-libs>=1.2.1-r0' \
+    'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' \
+    'libxslt>=1.1.43-r4' 'musl-utils>=1.2.6-r3'
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY --from=build --chown=10001:10001 /app/dist /usr/share/nginx/html
 
