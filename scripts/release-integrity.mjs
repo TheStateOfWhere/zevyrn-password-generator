@@ -122,6 +122,45 @@ export async function snapshot(directory) {
   async function walk(dir){for(const name of (await readdir(dir)).sort()){const path=resolve(dir,name),s=await lstat(path);assert(!s.isSymbolicLink(),'Symlink rejected');if(s.isDirectory())await walk(path);else{assert(s.isFile());files[relative(directory,path).split(sep).join('/')]=hash(await readFile(path));}}}
   await walk(resolve(directory));return files;
 }
+export const nginxAssetSHA256='876766b4e80133fd490603e073d3567425b88794828a9292104244c9e40875ed';
+function safeAssetPath(path){
+  assert(typeof path==='string'&&path.length>0&&path.split('/').every(part=>/^[A-Za-z0-9._-]+$/.test(part)&&part!=='.'&&part!=='..'&&!part.endsWith('.')&&!/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)),'Unsafe asset path');
+}
+function assetDirectories(files){
+  const directories=new Set();for(const path of Object.keys(files)){safeAssetPath(path);const parts=path.split('/');while(parts.length>1){parts.pop();directories.add(parts.join('/'));}}
+  return [...directories].sort();
+}
+function validateAssetInventory(inventory){
+  same(Object.keys(inventory).sort(),['directories','files']);
+  assert(inventory.files&&typeof inventory.files==='object'&&!Array.isArray(inventory.files));
+  assert(Object.keys(inventory.files).length>0&&Array.isArray(inventory.directories));
+  for(const [path,digest] of Object.entries(inventory.files)){safeAssetPath(path);assert(typeof digest==='string'&&hex.test(digest));}
+  inventory.directories.forEach(safeAssetPath);
+  same(inventory.directories,assetDirectories(inventory.files));
+  for(const path of inventory.directories)assert(!Object.hasOwn(inventory.files,path),'File/directory collision');
+  const paths=[...Object.keys(inventory.files),...inventory.directories];assert(new Set(paths.map(path=>path.toLowerCase())).size===paths.length,'Non-portable asset collision');
+}
+export async function assetSnapshot(directory){
+  const root=resolve(directory),entries=[],directories=[];
+  const rootStat=await lstat(root);assert(rootStat.isDirectory()&&!rootStat.isSymbolicLink());
+  async function walk(dir){for(const name of (await readdir(dir)).sort()){
+    const path=resolve(dir,name),key=relative(root,path).split(sep).join('/');safeAssetPath(key);
+    // Backslashes must not become path separators when artifacts cross platforms.
+    assert(!name.includes('\\'));const stat=await lstat(path);assert(!stat.isSymbolicLink(),'Asset symlink rejected');
+    if(stat.isDirectory()){directories.push(key);await walk(path);}else{assert(stat.isFile(),'Non-regular asset rejected');entries.push([key,hash(await readFile(path))]);}
+  }}
+  await walk(root);const inventory={files:Object.fromEntries(entries),directories:directories.sort()};validateAssetInventory(inventory);return inventory;
+}
+export function validateRuntimeAssets(application,runtime){
+  validateAssetInventory(application);validateAssetInventory(runtime);
+  assert(!Object.keys(application.files).some(path=>path.split('/').at(-1)==='50x.html'),'Application/server asset collision');
+  same(runtime.files,{...application.files,'50x.html':nginxAssetSHA256});
+  same(runtime.directories,application.directories);return runtime.files;
+}
+export async function verifyRetainedAssets(directory,identity){
+  const bytes=await readFile(resolve(directory,'assets.json'));assert(identity.assetsSHA256===hash(bytes));
+  const expected=json(bytes),actual=await assetSnapshot(resolve(directory,'assets'));same(actual.files,expected);return expected;
+}
 export function verifyLoaded(identity,image) {
   assert(image.Os==='linux'&&image.Architecture==='amd64');same(image.RootFS.Layers,identity.diffIDs);
   for(const key of ['User','WorkingDir','StopSignal','Entrypoint','Cmd','ExposedPorts','Env','Labels'])same(image.Config[key],identity.config.config[key]);
@@ -231,8 +270,7 @@ export async function verifyPacket(directory,expected) {
   for(const path of requiredFiles)assert(Object.hasOwn(actual,path),'Missing evidence: '+path);
   const identity=await readJSON(resolve(directory,'identity.json'));
   same(await inspectArchive(resolve(directory,'archive.oci.tar'),expected.sourceCommit),Object.fromEntries(Object.entries(identity).filter(([k])=>!['sourceTree','assetsSHA256'].includes(k))));
-  same(await snapshot(resolve(directory,'assets')),await readJSON(resolve(directory,'assets.json')));
-  assert(identity.assetsSHA256===hash(await readFile(resolve(directory,'assets.json'))));
+  await verifyRetainedAssets(directory,identity);
   const evidence={};for(const [name,file] of Object.entries({browser:'browser-results.json',health:'health.json',runtime:'runtime-scan.json',builder:'builder-scan.json',builderIdentity:'builder-identity.json',scanner:'scanner-version.json',sbom:'runtime-sbom.cdx.json',npm:'npm-audit.json'}))evidence[name]=await readJSON(resolve(directory,file));
   validateEvidence(identity,evidence,seal.context);same(seal.archiveSHA256,identity.archiveSHA256);same(seal.indexDigest,identity.indexDigest);
   validateQuality(await readJSON(resolve(directory,'quality-run.json')),await readJSON(resolve(directory,'quality-jobs.json')),expected.sourceCommit,seal.context);
@@ -264,18 +302,19 @@ async function main() {
   }
   else if(mode==='assets'){
     const directory=args[0],identity=await readJSON(resolve(directory,'identity.json'));
-    await writeJSON(resolve(directory,'assets.json'),await snapshot(resolve(directory,'assets')));
+    const files=validateRuntimeAssets(await assetSnapshot(args[1]),await assetSnapshot(resolve(directory,'assets')));
+    await writeJSON(resolve(directory,'assets.json'),files);
     identity.assetsSHA256=hash(await readFile(resolve(directory,'assets.json')));identity.sourceTree=context().sourceTree;
     await writeJSON(resolve(directory,'identity.json'),identity);
-  } else if(mode==='check-assets')same(await snapshot(args[0]),await readJSON(args[1]));
+  } else if(mode==='check-assets')same((await assetSnapshot(args[0])).files,await readJSON(args[1]));
   else if(mode==='browser'){
     const directory=args[0],identity=await readJSON(resolve(directory,'identity.json')),ctx=context();
     const inspected=await inspectArchive(resolve(directory,'archive.oci.tar'),ctx.sourceCommit);
     same(inspected,Object.fromEntries(Object.entries(identity).filter(([k])=>!['sourceTree','assetsSHA256'].includes(k))));
     assert(identity.sourceTree===ctx.sourceTree&&identity.assetsSHA256===hash(await readFile(resolve(directory,'assets.json'))));
-    const assets=await readJSON(resolve(directory,'assets.json'));same(await snapshot(resolve(directory,'assets')),assets);same(await snapshot('dist'),assets);
+    const assets=await verifyRetainedAssets(directory,identity);same((await assetSnapshot('dist')).files,assets);
     const results=[];for(const name of suites){const r=spawnSync(process.execPath,['tests/browser-'+name+'.mjs'],{stdio:'inherit'});assert(r.status===0,'Browser suite failed: '+name);results.push({name,conclusion:'success'});}
-    same(await snapshot('dist'),assets);
+    same((await assetSnapshot('dist')).files,assets);await verifyRetainedAssets(directory,identity);
     await writeJSON(resolve(directory,'browser-results.json'),{...ctx,archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,assetsSHA256:identity.assetsSHA256,suites:results});
   }
   else if(mode==='loaded')verifyLoaded(await readJSON(args[0]),(await readJSON(args[1]))[0]);

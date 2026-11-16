@@ -110,8 +110,7 @@ jobs:
           docker create --name zevyrn-release-assets zevyrn-release-runtime:1.2.2
           mkdir artifacts/release/packet/assets
           docker cp zevyrn-release-assets:/usr/share/nginx/html/. artifacts/release/packet/assets/
-          diff --recursive --brief dist artifacts/release/packet/assets
-          node scripts/release-integrity.mjs assets artifacts/release/packet
+          node scripts/release-integrity.mjs assets artifacts/release/packet dist
       - name: Collect sanitized failed-archive diagnostics
         if: ${{ failure() && steps.archive.conclusion == 'failure' }}
         shell: bash

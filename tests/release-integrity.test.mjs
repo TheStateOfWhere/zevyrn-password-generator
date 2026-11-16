@@ -1,12 +1,85 @@
 import {test} from 'node:test';
 import {spawnSync} from 'node:child_process';
-import {mkdtempSync,writeFileSync,readFileSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync,mkdirSync,renameSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {hash,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
+import {hash,assetSnapshot,validateRuntimeAssets,verifyRetainedAssets,nginxAssetSHA256,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
+const nginxPage=`<!DOCTYPE html>
+<html>
+<head>
+<title>Error</title>
+<style>
+html { color-scheme: light dark; }
+body { width: 35em; margin: 0 auto;
+font-family: Tahoma, Verdana, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<h1>An error occurred.</h1>
+<p>Sorry, the page you are looking for is currently unavailable.<br/>
+Please try again later.</p>
+<p>If you are the system administrator of this resource then you should check
+the error log for details.</p>
+<p><em>Faithfully yours, nginx.</em></p>
+</body>
+</html>
+`;
+function assetFixture(){
+  const root=mkdtempSync(join(tmpdir(),'zevyrn-asset-inventory-')),application=join(root,'application'),runtime=join(root,'assets');
+  for(const directory of [application,runtime]){mkdirSync(join(directory,'licenses'),{recursive:true});writeFileSync(join(directory,'index.html'),'application fixture');writeFileSync(join(directory,'licenses','LICENSE.txt'),'license fixture');}
+  writeFileSync(join(runtime,'50x.html'),nginxPage);return {root,application,runtime};
+}
+test('exact application-plus-approved-Nginx inventory validates actual recursive files and fixed hash',async()=>{
+  assert.equal(hash(Buffer.from(nginxPage)),nginxAssetSHA256);const f=assetFixture();
+  const runtime=await assetSnapshot(f.runtime);assert.deepEqual(validateRuntimeAssets(await assetSnapshot(f.application),runtime),runtime.files);
+  assert.deepEqual(runtime.directories,['licenses']);assert.equal(runtime.files['50x.html'],nginxAssetSHA256);
+});
+test('asset inventory rejects missing, modified, renamed, extra and nested application files',async()=>{
+  const f=assetFixture(),application=await assetSnapshot(f.application),runtime=await assetSnapshot(f.runtime);
+  for(const change of [r=>delete r.files['index.html'],r=>r.files['index.html']='e'.repeat(64),r=>{r.files['renamed.html']=r.files['index.html'];delete r.files['index.html'];},
+    r=>r.files['extra.txt']=sha.slice(7),r=>{r.files['unexpected/file.txt']=sha.slice(7);r.directories.push('unexpected');},r=>r.directories.push('empty')]){
+    const r=clone(runtime);change(r);assert.throws(()=>validateRuntimeAssets(application,r));
+  }
+});
+test('server asset must be present at the exact root path and cannot collide with application assets',async()=>{
+  const f=assetFixture(),application=await assetSnapshot(f.application),runtime=await assetSnapshot(f.runtime);
+  for(const change of [r=>delete r.files['50x.html'],r=>r.files['50x.html']='f'.repeat(64),r=>{r.files['licenses/50x.html']=r.files['50x.html'];delete r.files['50x.html'];}]){
+    const r=clone(runtime);change(r);assert.throws(()=>validateRuntimeAssets(application,r));
+  }
+  for(const path of ['50x.html','licenses/50x.html']){const a=clone(application);a.files[path]=nginxAssetSHA256;assert.throws(()=>validateRuntimeAssets(a,runtime));}
+  writeFileSync(join(f.runtime,'50x.html'),nginxPage.replace('Error','error'));assert.equal(readFileSync(join(f.runtime,'50x.html')).length,Buffer.byteLength(nginxPage));
+  const awaitedRuntime=await assetSnapshot(f.runtime);assert.throws(()=>validateRuntimeAssets(application,awaitedRuntime));
+});
+test('asset paths reject traversal, absolute paths, separators, controls and portability collisions',async()=>{
+  const f=assetFixture(),application=await assetSnapshot(f.application),runtime=await assetSnapshot(f.runtime);
+  for(const path of ['../escape','/absolute','a/../escape','a//file','a/./file','a\\file','C:/file','bad\nfile','a/%2e%2e/file','NUL','con.txt','trailing.']){
+    const r=clone(runtime);r.files[path]='a'.repeat(64);assert.throws(()=>validateRuntimeAssets(application,r));
+  }
+  const duplicate=clone(runtime);duplicate.files['INDEX.HTML']=duplicate.files['index.html'];assert.throws(()=>validateRuntimeAssets(application,duplicate));
+  const collision=clone(runtime);collision.files.licenses='a'.repeat(64);assert.throws(()=>validateRuntimeAssets(application,collision));
+});
+test('filesystem enumeration rejects unexpected empty directories and changed or renamed files',async()=>{
+  const f=assetFixture(),application=await assetSnapshot(f.application);renameSync(join(f.runtime,'index.html'),join(f.runtime,'renamed.html'));
+  const awaitedRuntime=await assetSnapshot(f.runtime);assert.throws(()=>validateRuntimeAssets(application,awaitedRuntime));
+  mkdirSync(join(f.application,'unexpected-empty'));await assert.rejects(assetSnapshot(f.application));
+});
+test('filesystem enumeration rejects directory symlinks/junctions including a linked root',async()=>{
+  const f=assetFixture(),link=join(f.root,'linked-root');symlinkSync(f.application,link,process.platform==='win32'?'junction':'dir');await assert.rejects(assetSnapshot(link));
+  symlinkSync(f.application,join(f.runtime,'linked-directory'),process.platform==='win32'?'junction':'dir');await assert.rejects(assetSnapshot(f.runtime));
+});
+test('filesystem enumeration rejects non-regular FIFO entries',{skip:process.platform==='win32'&&'POSIX FIFO entries are unavailable on Windows'},async()=>{
+  const f=assetFixture();const fifo=spawnSync('mkfifo',[join(f.runtime,'pipe')],{encoding:'utf8'});assert.equal(fifo.status,0);await assert.rejects(assetSnapshot(f.runtime));
+});
+test('retained assets and manifest remain bound before browser qualification and packet sealing',async()=>{
+  const f=assetFixture(),runtime=await assetSnapshot(f.runtime);validateRuntimeAssets(await assetSnapshot(f.application),runtime);
+  const path=join(f.root,'assets.json');writeFileSync(path,JSON.stringify(runtime.files));const identity={assetsSHA256:hash(readFileSync(path))};await verifyRetainedAssets(f.root,identity);
+  writeFileSync(join(f.runtime,'index.html'),'modified fixture!!!');await assert.rejects(verifyRetainedAssets(f.root,identity));
+  const changed=await assetSnapshot(f.runtime);writeFileSync(path,JSON.stringify(changed.files));await assert.rejects(verifyRetainedAssets(f.root,identity));
+  writeFileSync(path,JSON.stringify(runtime.files));writeFileSync(join(f.runtime,'index.html'),'application fixture');mkdirSync(join(f.runtime,'unexpected-empty'));await assert.rejects(verifyRetainedAssets(f.root,identity));
+});
 const mt='application/vnd.oci.image.manifest.v1+json',it='application/vnd.oci.image.index.v1+json',ct='application/vnd.oci.image.config.v1+json';
 function config(){return {os:'linux',architecture:'amd64',rootfs:{type:'layers',diff_ids:[sha]},config:{User:'10001:10001',WorkingDir:'/',StopSignal:'SIGQUIT',Entrypoint:['nginx'],Cmd:['-g','daemon off;'],ExposedPorts:{'8080/tcp':{}},Healthcheck:{Test:['CMD-SHELL','wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1'],Interval:30000000000,Timeout:3000000000,StartPeriod:10000000000,Retries:3},Env:['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','NGINX_VERSION=1.30.6','PKG_RELEASE=1','DYNPKG_RELEASE=1','NJS_VERSION=1.0.2','NJS_RELEASE=1','ACME_VERSION=0.4.1'],Labels:{'org.opencontainers.image.version':'1.2.2','org.opencontainers.image.revision':source,'org.opencontainers.image.source':'https://github.com/'+repository}}};}
 function graph(change=()=>{},attest=true){
