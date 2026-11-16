@@ -117,7 +117,8 @@ test('runtime HIGH fixes retain minimum security versions without removing depen
     'RUN apk add --no-cache --upgrade \\',
     "    'libexpat>=2.10.0-r0' 'zlib>=1.4-r0' \\",
     "    'libx11>=1.8.14-r0' 'brotli-libs>=1.2.1-r0' \\",
-    "    'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0'",
+    "    'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' \\",
+    "    'libxslt>=1.1.43-r4' 'musl-utils>=1.2.6-r3'",
   ].join('\n');
   const verify = text => {
     const stage = text.split(/^FROM nginx:[^\n]+ AS runtime-rootfs$/m)[1]?.split(/^FROM scratch AS runtime$/m)[0];
@@ -134,6 +135,8 @@ test('runtime HIGH fixes retain minimum security versions without removing depen
       ['brotli-libs','1.2.1-r0','1.2.0-r1'],
       ['curl','8.23.0-r0','8.22.0-r0'],
       ['libcurl','8.23.0-r0','8.22.0-r0'],
+      ['libxslt','1.1.43-r4','1.1.43-r3'],
+      ['musl-utils','1.2.6-r3','1.2.6-r2'],
     ].flatMap(([name,minimum,older]) => {
       const constraint = "'"+name+'>='+minimum+"'";
       return ['',name,"'"+name+'>='+older+"'"].map(replacement => dockerfile.replace(constraint,replacement));
