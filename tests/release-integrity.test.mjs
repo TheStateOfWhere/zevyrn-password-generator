@@ -1,6 +1,10 @@
 import {test} from 'node:test';
+import {spawnSync} from 'node:child_process';
+import {mkdtempSync,writeFileSync,readFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {hash,inspectGraph,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
+import {hash,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
 const mt='application/vnd.oci.image.manifest.v1+json',it='application/vnd.oci.image.index.v1+json',ct='application/vnd.oci.image.config.v1+json';
@@ -8,10 +12,11 @@ function config(){return {os:'linux',architecture:'amd64',rootfs:{type:'layers',
 function graph(change=()=>{},attest=true){
   const members=new Map(),store=(value,mediaType)=>{const bytes=Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value));const digest='sha256:'+hash(bytes);members.set('blobs/sha256/'+digest.slice(7),bytes);return {mediaType,digest,size:bytes.length};};
   const c=config(),s={_type:'https://in-toto.io/Statement/v1',predicateType:'https://slsa.dev/provenance/v1',subject:[],predicate:{}};
-  const model={config:c,statement:s,extra:null,duplicate:false,corrupt:false,orphan:false,duplicateMember:false};change(model);
+  const model={config:c,statement:s,extra:null,duplicate:false,corrupt:false,orphan:false,duplicateMember:false,artifact:false,attestationConfig:null,attestationConfigType:null,artifactType:null,manifestSubject:null,badSize:false};change(model);
   const runtime={...store({schemaVersion:2,mediaType:mt,config:store(c,ct),layers:[store(Buffer.from('synthetic compressed layer'),'application/vnd.oci.image.layer.v1.tar+gzip')]},mt),platform:{os:'linux',architecture:'amd64'}};
+  if(model.badSize)runtime.size++;
   const descriptors=[runtime];if(model.duplicate)descriptors.push(clone(runtime));
-  if(attest){if(!s.subject.length)s.subject=[{name:'runtime',digest:{sha256:runtime.digest.slice(7)}}];const layer={...store(s,'application/vnd.in-toto+json'),annotations:{'in-toto.io/predicate-type':s.predicateType}};descriptors.push({...store({schemaVersion:2,mediaType:mt,config:store({},ct),layers:[layer]},mt),platform:{os:'unknown',architecture:'unknown'},annotations:{'vnd.docker.reference.type':'attestation-manifest','vnd.docker.reference.digest':runtime.digest}});}
+  if(attest){if(!s.subject.length)s.subject=[{name:'runtime',digest:{sha256:runtime.digest.slice(7)}}];const layer={...store(s,'application/vnd.in-toto+json'),annotations:{'in-toto.io/predicate-type':s.predicateType}};const legacy={architecture:'unknown',os:'unknown',config:{},rootfs:{type:'layers',diff_ids:[layer.digest]}};const manifest={schemaVersion:2,mediaType:mt,config:store(model.attestationConfig??(model.artifact?{}:legacy),model.attestationConfigType??(model.artifact?'application/vnd.oci.empty.v1+json':ct)),layers:[layer]};if(model.artifact){manifest.artifactType=model.artifactType??'application/vnd.docker.attestation.manifest.v1+json';manifest.subject=model.manifestSubject??{mediaType:runtime.mediaType,digest:runtime.digest,size:runtime.size};}descriptors.push({...store(manifest,mt),platform:{os:'unknown',architecture:'unknown'},annotations:{'vnd.docker.reference.type':'attestation-manifest','vnd.docker.reference.digest':runtime.digest}});}
   if(model.extra)descriptors.push({...clone(runtime),platform:model.extra});
   const index={schemaVersion:2,mediaType:it,manifests:descriptors};members.set('index.json',Buffer.from(JSON.stringify({schemaVersion:2,mediaType:it,manifests:[store(index,it)]})));members.set('oci-layout',Buffer.from('{"imageLayoutVersion":"1.0.0"}'));
   if(model.corrupt)members.set('blobs/sha256/'+runtime.digest.slice(7),Buffer.from('{}'));
@@ -20,6 +25,64 @@ function graph(change=()=>{},attest=true){
   return ()=>inspectGraph(name=>{assert(members.has(name));return members.get(name);},names,source);
 }
 test('OCI graph accepts only one runtime and recognized subject-bound provenance, including no-attestation case',()=>{assert.equal(graph()().version,'1.2.2');assert.equal(graph(()=>{},false)().version,'1.2.2');});
+test('OCI graph separately accepts documented legacy image and OCI artifact attestation configurations',()=>{
+  assert.equal(graph()().version,'1.2.2');assert.equal(graph(m=>m.artifact=true)().version,'1.2.2');
+});
+const rejectsCode=(operation,code)=>assert.throws(operation,error=>diagnosticCode(error)===code);
+test('attestation config rejects wrong media types, hybrid formats, bad content and artifact types',()=>{
+  for(const change of [m=>m.attestationConfig={},m=>m.attestationConfigType='unknown',m=>m.attestationConfigType='application/vnd.oci.empty.v1+json',
+    m=>{m.artifact=true;m.attestationConfigType=ct;},m=>{m.artifact=true;m.attestationConfig={unexpected:'content'};},
+    m=>{m.artifact=true;m.artifactType='unknown';},m=>m.attestationConfig={architecture:'amd64',os:'linux',config:{},rootfs:{type:'layers',diff_ids:[]}},
+    m=>m.attestationConfig={architecture:'unknown',os:'unknown',config:{},rootfs:{type:'layers',diff_ids:[sha]}}]){
+    rejectsCode(graph(change),'OCI_ATTESTATION_CONFIG_INVALID');
+  }
+});
+test('OCI artifact manifest subject must match runtime digest, media type and size',()=>{
+  for(const subject of [{mediaType:mt,digest:sha,size:1},{mediaType:'unknown',digest:sha,size:1},{}])
+    rejectsCode(graph(m=>{m.artifact=true;m.manifestSubject=subject;}),'OCI_PROVENANCE_SUBJECT_INVALID');
+});
+test('digest and size corruption, duplicate runtime and changed runtime protections retain specific blocking codes',()=>{
+  for(const change of [m=>m.badSize=true,m=>m.corrupt=true])rejectsCode(graph(change),'OCI_BLOB_DIGEST_MISMATCH');
+  rejectsCode(graph(m=>m.duplicate=true),'OCI_RUNTIME_DESCRIPTOR_INVALID');
+  for(const change of [c=>c.config.User='0',c=>c.config.Labels['org.opencontainers.image.revision']=tree,c=>c.config.Healthcheck.Retries=1])
+    rejectsCode(graph(m=>change(m.config)),'OCI_RUNTIME_CONFIG_INVALID');
+  rejectsCode(graph(m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}}]),'OCI_PROVENANCE_SUBJECT_INVALID');
+});
+test('diagnostic codes cannot be spoofed by secret-like messages or exception properties',()=>{
+  const secret='TOKEN=fixture-secret-do-not-print';const error=Object.assign(new Error(secret),{code:'OCI_LAYOUT_INVALID',stage:secret});
+  assert.equal(diagnosticCode(error),'RELEASE_INTEGRITY_UNEXPECTED');
+  assert.equal(JSON.stringify(inspectionDiagnostic(diagnosticCode(error))).includes(secret),false);
+  assert.throws(()=>inspectionDiagnostic(secret));
+  assert.equal(inspectionDiagnostic('OCI_LAYOUT_INVALID').promotionEligible,false);
+});
+test('tool diagnostics accept only recognized version and immutable image identity fields',()=>{
+  const image='sha256:'+'e'.repeat(64);
+  assert.deepEqual(sanitizedToolIdentity('github.com/docker/buildx v0.30.1 abc','Nodes:\nBuildKit version: v0.26.2\n',image+'\n'),{buildxVersion:'v0.30.1',buildkitVersion:'v0.26.2',buildkitImageID:image});
+  assert.equal(sanitizedToolIdentity('','BuildKit:       v0.26.2','').buildkitVersion,'v0.26.2');
+  assert.deepEqual(sanitizedToolIdentity('TOKEN=fixture-secret v1.2.3','TOKEN=fixture-secret v1.2.3','TOKEN=fixture-secret'),{buildxVersion:null,buildkitVersion:null,buildkitImageID:null});
+});
+test('CLI inspection failures emit one safe code, retain sanitized results and exit 1',()=>{
+  const directory=mkdtempSync(join(tmpdir(),'zevyrn-inspection-diagnostics-')),output=join(directory,'inspection.json');
+  const env={...process.env,GITHUB_SHA:source};delete env.QUALIFICATION_KIND;
+  const git=spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'});
+  const result=spawnSync(process.execPath,['scripts/release-integrity.mjs','inspect',join(directory,'TOKEN=fixture-secret.oci.tar'),join(directory,'identity.json'),output],{env,encoding:'utf8'});
+  const code=git.status===0?'OCI_ARCHIVE_READ_INVALID':'SOURCE_IDENTITY_INVALID';
+  assert.equal(result.status,1);assert.equal(result.stdout,'');assert.equal(result.stderr.trim(),code);
+  assert.deepEqual(JSON.parse(readFileSync(output)),inspectionDiagnostic(code));
+  const fallback=spawnSync(process.execPath,['scripts/release-integrity.mjs','TOKEN=fixture-secret'],{encoding:'utf8'});
+  assert.equal(fallback.status,1);assert.equal(fallback.stdout,'');assert.equal(fallback.stderr.trim(),'RELEASE_INTEGRITY_UNEXPECTED');
+});
+test('CLI diagnostic evidence contains only archive hash, validated index digest and sanitized tool identities',()=>{
+  const directory=mkdtempSync(join(tmpdir(),'zevyrn-failed-evidence-')),archive=join(directory,'archive'),metadata=join(directory,'metadata'),output=join(directory,'diagnostics.json');
+  writeFileSync(archive,'synthetic archive fixture');writeFileSync(metadata,JSON.stringify({'containerimage.digest':sha,secret:'TOKEN=fixture-secret'}));
+  for(const name of ['release-buildx.txt','release-buildkit.txt','release-buildkit-image.txt'])writeFileSync(join(directory,name),'TOKEN=fixture-secret');
+  const result=spawnSync(process.execPath,['scripts/release-integrity.mjs','diagnostics',archive,metadata,output],{env:{...process.env,RUNNER_TEMP:directory},encoding:'utf8'});
+  assert.equal(result.status,0);assert.equal(result.stdout,'');assert.equal(result.stderr,'');
+  assert.deepEqual(JSON.parse(readFileSync(output)),{schemaVersion:1,promotionEligible:false,archiveSHA256:hash(Buffer.from('synthetic archive fixture')),indexDigest:sha,indexDigestVerified:false,buildxVersion:null,buildkitVersion:null,buildkitImageID:null});
+  writeFileSync(metadata,JSON.stringify({'containerimage.digest':'TOKEN=fixture-secret'}));
+  const malformed=spawnSync(process.execPath,['scripts/release-integrity.mjs','diagnostics',join(directory,'missing'),metadata,output],{env:{...process.env,RUNNER_TEMP:directory},encoding:'utf8'});
+  assert.equal(malformed.status,0);const sanitized=JSON.parse(readFileSync(output));assert.equal(sanitized.archiveSHA256,null);assert.equal(sanitized.indexDigest,null);
+});
 test('OCI graph rejects additional platforms, duplicate runtimes, orphan blobs, corrupt blobs and duplicate members',()=>{for(const change of [m=>m.extra={os:'linux',architecture:'arm64'},m=>m.extra={os:'windows',architecture:'amd64'},m=>m.duplicate=true,m=>m.orphan=true,m=>m.corrupt=true,m=>m.duplicateMember=true])assert.throws(graph(change));});
 test('OCI graph rejects unknown provenance and incorrect or multiple attestation subjects',()=>{for(const change of [m=>m.statement.predicateType='https://unrecognized',m=>m.statement._type='unknown',m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}}],m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}},{digest:{sha256:'e'.repeat(64)}}]])assert.throws(graph(change));});
 test('archive config rejects historical version, false source labels and changed runtime protections',()=>{for(const change of [c=>c.config.Labels['org.opencontainers.image.version']='1.2.1',c=>c.config.Labels['org.opencontainers.image.revision']='f'.repeat(40),c=>c.config.User='0',c=>c.config.Entrypoint=['sh'],c=>c.config.Env.push('EXTRA=1'),c=>c.config.ExposedPorts['80/tcp']={},c=>c.config.Healthcheck.Retries=1]){const c=config();change(c);assert.throws(()=>validateConfig(c,source));}});

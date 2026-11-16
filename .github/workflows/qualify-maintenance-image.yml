@@ -87,6 +87,7 @@ jobs:
           test "$audit_status" -le 1
           node scripts/ci-security.mjs npm "$RUNNER_TEMP/npm-raw.json" artifacts/release/packet/npm-audit.json
       - name: Build builder and one retained Linux/amd64 OCI archive
+        id: archive
         shell: bash
         run: |
           set -euo pipefail
@@ -95,8 +96,12 @@ jobs:
           docker build --platform linux/amd64 --target build -t zevyrn-release-builder .
           docker save -o "$RUNNER_TEMP/builder.tar" zevyrn-release-builder
           docker buildx create --name "zevyrn-release-$GITHUB_RUN_ID" --driver docker-container --use
+          mkdir -p artifacts/release/diagnostics
+          docker buildx version > "$RUNNER_TEMP/release-buildx.txt"
+          docker buildx inspect --bootstrap > "$RUNNER_TEMP/release-buildkit.txt"
+          docker inspect --format '{{.Image}}' "buildx_buildkit_zevyrn-release-${GITHUB_RUN_ID}0" > "$RUNNER_TEMP/release-buildkit-image.txt"
           docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$QUALIFICATION_SOURCE" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag ghcr.io/thestateofwhere/zevyrn:1.2.2 --output type=oci,dest=artifacts/release/packet/archive.oci.tar --metadata-file artifacts/release/packet/build-metadata.json .
-          node scripts/release-integrity.mjs inspect artifacts/release/packet/archive.oci.tar artifacts/release/packet/identity.json
+          node scripts/release-integrity.mjs inspect artifacts/release/packet/archive.oci.tar artifacts/release/packet/identity.json artifacts/release/diagnostics/inspection.json
           skopeo inspect --raw oci-archive:artifacts/release/packet/archive.oci.tar > "$RUNNER_TEMP/index.json"
           test "sha256:$(sha256sum "$RUNNER_TEMP/index.json" | cut -d ' ' -f 1)" = "$(jq -r .indexDigest artifacts/release/packet/identity.json)"
           skopeo copy --override-os linux --override-arch amd64 oci-archive:artifacts/release/packet/archive.oci.tar docker-daemon:zevyrn-release-runtime:1.2.2
@@ -107,6 +112,21 @@ jobs:
           docker cp zevyrn-release-assets:/usr/share/nginx/html/. artifacts/release/packet/assets/
           diff --recursive --brief dist artifacts/release/packet/assets
           node scripts/release-integrity.mjs assets artifacts/release/packet
+      - name: Collect sanitized failed-archive diagnostics
+        if: ${{ failure() && steps.archive.conclusion == 'failure' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/release/diagnostics
+          node scripts/release-integrity.mjs diagnostics artifacts/release/packet/archive.oci.tar artifacts/release/packet/build-metadata.json artifacts/release/diagnostics/archive.json
+      - name: Retain non-promotable failure diagnostics only
+        if: ${{ failure() && steps.archive.conclusion == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zevyrn-v1.2.2-failed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release/diagnostics/*.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Fresh builder and exact archive security scans and SBOM
         shell: bash
         run: |

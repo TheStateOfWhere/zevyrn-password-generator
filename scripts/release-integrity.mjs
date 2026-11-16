@@ -20,6 +20,17 @@ const json=bytes=>JSON.parse(bytes.toString());
 const same=(a,b)=>assert.deepEqual(a,b);
 const sha=value=>assert(digest.test(value),'Invalid digest');
 const commit=value=>assert(/^[0-9a-f]{40}$/.test(value),'Invalid commit/tree');
+const failureCodes=new WeakMap();
+const codes=new Set(['OCI_LAYOUT_INVALID','OCI_RUNTIME_DESCRIPTOR_INVALID','OCI_RUNTIME_CONFIG_INVALID','OCI_ATTESTATION_DESCRIPTOR_INVALID','OCI_ATTESTATION_CONFIG_INVALID','OCI_PROVENANCE_INVALID','OCI_PROVENANCE_SUBJECT_INVALID','OCI_BLOB_DIGEST_MISMATCH','OCI_ARCHIVE_READ_INVALID','OCI_INSPECTION_OUTPUT_INVALID','SOURCE_IDENTITY_INVALID','RELEASE_INTEGRITY_UNEXPECTED']);
+function stage(code,operation){try{return operation();}catch(error){if(failureCodes.has(error))throw error;const failure=new Error();failureCodes.set(failure,code);throw failure;}}
+export const diagnosticCode=error=>failureCodes.get(error)??'RELEASE_INTEGRITY_UNEXPECTED';
+export function inspectionDiagnostic(code){assert(code==='OK'||codes.has(code));return {schemaVersion:1,promotionEligible:false,stage:'archive-inspection',result:code==='OK'?'success':'failure',code};}
+export function sanitizedToolIdentity(buildx,buildkit,image){
+  const version=/\bv\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\b/;
+  return {buildxVersion:buildx.match(/^github\.com\/docker\/buildx\s+(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\b/)?.[1]??null,
+    buildkitVersion:buildkit.split(/\r?\n/).find(line=>/^\s*BuildKit(?: version)?:\s*v/.test(line))?.match(version)?.[0]??null,
+    buildkitImageID:/^sha256:[0-9a-f]{64}$/.test(image.trim())?image.trim():null};
+}
 export function qualificationIdentity(env,event,checkedOutCommit) {
   assert(env.GITHUB_REPOSITORY===repository&&event.repository?.id===repositoryId);
   commit(env.GITHUB_SHA);commit(checkedOutCommit);
@@ -49,41 +60,61 @@ export function validateConfig(c,sourceCommit) {
   assert(c.rootfs.type==='layers'&&c.rootfs.diff_ids.length>0);c.rootfs.diff_ids.forEach(sha);
 }
 export function inspectGraph(read,names,sourceCommit) {
+  return stage('OCI_LAYOUT_INVALID',()=>{
   const seen=new Set(),used=new Set();
   for(const name of names){assert(!seen.has(name),'Duplicate archive member');seen.add(name);assert(/^(?:index\.json|oci-layout|blobs\/?|blobs\/sha256\/?|blobs\/sha256\/[0-9a-f]{64})$/.test(name),'Unexpected archive member');}
   same(json(read('oci-layout')),{'imageLayoutVersion':'1.0.0'});
-  const blob=d=>{sha(d.digest);assert(Number.isSafeInteger(d.size)&&d.size>0);const name='blobs/sha256/'+d.digest.slice(7),bytes=read(name);assert(bytes.length===d.size&&'sha256:'+hash(bytes)===d.digest,'Blob digest/size mismatch');used.add(name);return bytes;};
+  const blob=d=>stage('OCI_BLOB_DIGEST_MISMATCH',()=>{sha(d.digest);assert(Number.isSafeInteger(d.size)&&d.size>0);const name='blobs/sha256/'+d.digest.slice(7),bytes=read(name);assert(bytes.length===d.size&&'sha256:'+hash(bytes)===d.digest,'Blob digest/size mismatch');used.add(name);return bytes;});
   let bytes=read('index.json'),index=json(bytes);
   if(index.manifests?.length===1&&index.manifests[0].mediaType===indexType){bytes=blob(index.manifests[0]);index=json(bytes);}
   assert(index.schemaVersion===2&&index.mediaType===indexType&&Array.isArray(index.manifests));
-  const runtime=index.manifests.filter(d=>d.platform?.os==='linux'&&d.platform?.architecture==='amd64');
-  assert(runtime.length===1,'Expected exactly one Linux/amd64 runtime');
-  const descriptor=runtime[0];assert(descriptor.mediaType===manifestType);assert(!descriptor.platform.variant);
+  const descriptor=stage('OCI_RUNTIME_DESCRIPTOR_INVALID',()=>{
+    const runtime=index.manifests.filter(d=>d.platform?.os==='linux'&&d.platform?.architecture==='amd64');
+    assert(runtime.length===1,'Expected exactly one Linux/amd64 runtime');
+    const d=runtime[0];assert(d.mediaType===manifestType);assert(!d.platform.variant);return d;
+  });
   const runtimeManifest=json(blob(descriptor));assert(runtimeManifest.schemaVersion===2&&runtimeManifest.mediaType===manifestType&&runtimeManifest.config.mediaType===configType);
-  const config=json(blob(runtimeManifest.config));validateConfig(config,sourceCommit);
+  const config=stage('OCI_RUNTIME_CONFIG_INVALID',()=>{const c=json(blob(runtimeManifest.config));validateConfig(c,sourceCommit);return c;});
   assert(runtimeManifest.layers.length>0);
   for(const layer of runtimeManifest.layers){assert(layer.mediaType==='application/vnd.oci.image.layer.v1.tar+gzip');blob(layer);}
-  const attestations=index.manifests.filter(d=>d!==descriptor);assert(attestations.length<=1,'Unexpected extra manifests');
+  const attestations=index.manifests.filter(d=>d!==descriptor);stage('OCI_ATTESTATION_DESCRIPTOR_INVALID',()=>assert(attestations.length<=1,'Unexpected extra manifests'));
   for(const d of attestations){
+    stage('OCI_ATTESTATION_DESCRIPTOR_INVALID',()=>{
     assert(d.mediaType===manifestType&&d.platform?.os==='unknown'&&d.platform?.architecture==='unknown','Unexpected platform');
     assert(d.annotations?.['vnd.docker.reference.type']==='attestation-manifest'&&d.annotations['vnd.docker.reference.digest']===descriptor.digest,'Unexpected attestation descriptor');
-    const m=json(blob(d));assert(m.schemaVersion===2&&m.mediaType===manifestType&&m.config.mediaType===configType);same(json(blob(m.config)),{});
-    assert(m.layers.length===1);
+    const m=json(blob(d));assert(m.schemaVersion===2&&m.mediaType===manifestType);
+    stage('OCI_ATTESTATION_CONFIG_INVALID',()=>{
+      assert(m.layers.length===1);
+      const c=json(blob(m.config));
+      if(m.config.mediaType==='application/vnd.oci.empty.v1+json'){
+        same(c,{});assert(m.config.size===2&&m.config.digest==='sha256:'+hash(Buffer.from('{}')));
+        if(Object.hasOwn(m.config,'data'))assert(m.config.data==='e30=');
+        assert(m.artifactType==='application/vnd.docker.attestation.manifest.v1+json');
+        stage('OCI_PROVENANCE_SUBJECT_INVALID',()=>{assert(m.subject);same({mediaType:m.subject.mediaType,digest:m.subject.digest,size:m.subject.size},{mediaType:descriptor.mediaType,digest:descriptor.digest,size:descriptor.size});});
+      }else{
+        assert(m.config.mediaType===configType&&!Object.hasOwn(m,'artifactType')&&!Object.hasOwn(m,'subject'));
+        same(c,{architecture:'unknown',os:'unknown',config:{},rootfs:{type:'layers',diff_ids:m.layers.map(layer=>layer.digest)}});
+      }
+    });
     for(const layer of m.layers){
+      stage('OCI_PROVENANCE_INVALID',()=>{
       assert(layer.mediaType==='application/vnd.in-toto+json');const s=json(blob(layer));
       assert(['https://in-toto.io/Statement/v0.1','https://in-toto.io/Statement/v1'].includes(s._type));
       assert(['https://slsa.dev/provenance/v0.2','https://slsa.dev/provenance/v1'].includes(s.predicateType));
       assert(layer.annotations?.['in-toto.io/predicate-type']===s.predicateType);
-      assert(s.subject?.length===1);same(s.subject[0].digest,{sha256:descriptor.digest.slice(7)});
+      stage('OCI_PROVENANCE_SUBJECT_INVALID',()=>{assert(s.subject?.length===1);same(s.subject[0].digest,{sha256:descriptor.digest.slice(7)});});
+      });
     }
+    });
   }
   same([...seen].filter(n=>/^blobs\/sha256\/[0-9a-f]{64}$/.test(n)).sort(),[...used].sort());
   return {version,indexDigest:'sha256:'+hash(bytes),platformDigest:descriptor.digest,configDigest:runtimeManifest.config.digest,diffIDs:config.rootfs.diff_ids,config};
+  });
 }
 const run=(program,args,input)=>{const r=spawnSync(program,args,{input,maxBuffer:512*1024*1024});if(r.error)throw r.error;assert(r.status===0,program+' failed');return r.stdout;};
 export async function inspectArchive(path,sourceCommit) {
-  const names=run('tar',['-tf',path]).toString().trim().split(/\r?\n/);
-  const result=inspectGraph(name=>run('tar',['-xOf',path,name]),names,sourceCommit);
+  const names=stage('OCI_ARCHIVE_READ_INVALID',()=>run('tar',['-tf',path]).toString().trim().split(/\r?\n/));
+  const result=inspectGraph(name=>stage('OCI_ARCHIVE_READ_INVALID',()=>run('tar',['-xOf',path,name])),names,sourceCommit);
   return {...result,sourceCommit,archiveSHA256:hash(await readFile(path))};
 }
 export async function snapshot(directory) {
@@ -214,7 +245,23 @@ async function main() {
     assert(process.env.GITHUB_OUTPUT);
     await writeFile(process.env.GITHUB_OUTPUT,`purpose=${ctx.purpose}\nsource_commit=${ctx.sourceCommit}\nquality_event=${ctx.qualityEvent}\nquality_branch=${ctx.qualityBranch}\n`,{flag:'a'});
   }
-  else if(mode==='inspect')await writeJSON(args[1],await inspectArchive(args[0],context().sourceCommit));
+  else if(mode==='inspect'){
+    let code='OK';
+    try{
+      const source=stage('SOURCE_IDENTITY_INVALID',()=>context().sourceCommit);
+      const identity=await inspectArchive(args[0],source);
+      try{await writeJSON(args[1],identity);}catch{stage('OCI_INSPECTION_OUTPUT_INVALID',()=>assert(false));}
+    }catch(error){code=diagnosticCode(error);throw error;}
+    finally{if(args[2])await writeJSON(args[2],inspectionDiagnostic(code));}
+  }
+  else if(mode==='diagnostics'){
+    const safeRead=async path=>{try{return await readFile(path);}catch{return null;}};
+    const archive=await safeRead(args[0]),metadata=await safeRead(args[1]),temp=process.env.RUNNER_TEMP;
+    let indexDigest=null;try{const value=json(metadata)['containerimage.digest'];if(digest.test(value))indexDigest=value;}catch{}
+    const text=async name=>(await safeRead(resolve(temp,name)))?.toString()??'';
+    await writeJSON(args[2],{schemaVersion:1,promotionEligible:false,archiveSHA256:archive?hash(archive):null,indexDigest,indexDigestVerified:false,
+      ...sanitizedToolIdentity(await text('release-buildx.txt'),await text('release-buildkit.txt'),await text('release-buildkit-image.txt'))});
+  }
   else if(mode==='assets'){
     const directory=args[0],identity=await readJSON(resolve(directory,'identity.json'));
     await writeJSON(resolve(directory,'assets.json'),await snapshot(resolve(directory,'assets')));
@@ -254,4 +301,4 @@ async function main() {
   }
   else throw Error('Unknown release-integrity operation');
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(()=>{console.error('Release integrity validation failed.');process.exitCode=1;});
+if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{console.error(diagnosticCode(error));process.exitCode=1;});
