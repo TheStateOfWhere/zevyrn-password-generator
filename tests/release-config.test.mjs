@@ -203,12 +203,12 @@ test('release metadata agrees and historical dictionary provenance stays unchang
   assert.equal(pkg.name,'zevyrn');
   assert.equal(lock.name,pkg.name);
   assert.equal(lock.packages[''].name,pkg.name);
-  assert.equal(pkg.version,'1.2.1');
+  assert.equal(pkg.version,'1.2.2');
   assert.equal(lock.version,pkg.version);
   assert.equal(lock.packages[''].version,pkg.version);
   assert.match(await read('Dockerfile'),/org.opencontainers.image.title="Zevyrn"/);
-  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.1"/);
-  assert.match(await read('public/index.html'),/class="version">v1.2.1/);
+  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.2"/);
+  assert.match(await read('public/index.html'),/class="version">v1.2.2/);
   assert.equal(JSON.parse(await read('data/readability-overrides.json')).version,'0.4.0');
 });
 
@@ -230,7 +230,7 @@ test('all legacy installation and proxy entry points retain their v1.1.0 content
 
 function legacyEquivalent(config) {
   return config
-    .replaceAll('zevyrn:1.2.1-local','keysmith:1.0.0-local')
+    .replaceAll('zevyrn:1.2.2-local','keysmith:1.0.0-local')
     .replaceAll('${ZEVYRN_PORT:-${KEYSMITH_PORT:-18080}}','${KEYSMITH_PORT:-18080}')
     .replaceAll('${ZEVYRN_DOMAIN:-${KEYSMITH_DOMAIN:?Set ZEVYRN_DOMAIN or KEYSMITH_DOMAIN in .env}}','${KEYSMITH_DOMAIN:?Set KEYSMITH_DOMAIN in .env}')
     .replaceAll('${ZEVYRN_BIND_IP:-${KEYSMITH_BIND_IP:?Set ZEVYRN_BIND_IP or KEYSMITH_BIND_IP in .env}}','${KEYSMITH_BIND_IP:?Set KEYSMITH_BIND_IP in .env}')
@@ -246,7 +246,7 @@ test('native configurations preserve the complete legacy security and networking
     const native=await read('compose.zevyrn'+suffix+'.yaml');
     assert.equal(legacyEquivalent(native),await read('compose'+suffix+'.yaml'));
     assert.match(native,/^  zevyrn:$/m);
-    assert.match(native,/image: zevyrn:1\.2\.1-local/);
+    assert.match(native,/image: zevyrn:1\.2\.2-local/);
     assert.match(native,new RegExp('^name: zevyrn'+suffix.replace('.','-')+'$','m'));
     const app=native.split(/\n  (?:traefik|caddy):/)[0];
     assert.doesNotMatch(app,/cap_add:/);
@@ -345,7 +345,7 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
         const result=await render(file,settings);
         assert.ifError(result.error); assert.equal(result.status,0,result.stderr);
         const config=JSON.parse(result.stdout),app=config.services[service];
-        assert.equal(app.image,family==='native'?'zevyrn:1.2.1-local':'keysmith:1.0.0-local');
+        assert.equal(app.image,family==='native'?'zevyrn:1.2.2-local':'keysmith:1.0.0-local');
         assert.equal(app.user,'10001:10001'); assert.equal(app.read_only,true);
         assert.deepEqual(app.cap_drop,['ALL']); assert.ok(app.security_opt.includes('no-new-privileges:true'));
         if(suffix) {

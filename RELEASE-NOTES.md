@@ -1,4 +1,19 @@
-# Zevyrn 1.2.1 — unreleased
+# Zevyrn 1.2.2 — unreleased security maintenance
+
+- Incorporates the runtime package maintenance validated at
+  `7b82c4970b7c724c030a8c1da9d43981d09cc76c`.
+- Requires patched libexpat, zlib, libxslt and musl-utils while retaining
+  the existing Alpine branch, pinned base images and other security floors.
+- Aligns application, container and installation metadata with version 1.2.2.
+
+Application behavior, password generation, dictionary, UI layout, runtime
+configuration, security gates and the three approved builder-only exceptions
+are unchanged. The visible version text changes to v1.2.2.
+
+No v1.2.2 image or release is published. A committed release candidate, fresh
+image qualification and separate publication approval are required.
+
+# Zevyrn 1.2.1 — published 2026-10-27
 
 - Keep existing passwords when generation fails without a settings change.
   Changing the active settings still clears results that no longer apply.
@@ -17,15 +32,10 @@
 Password-generation algorithms, the dictionary, entropy requirements, approved
 visual themes and legacy installation compatibility remain unchanged.
 
-These changes have not been published. The planned GHCR image,
-`ghcr.io/thestateofwhere/zevyrn:1.2.1`, remains unavailable pending publication
-and public-pull verification. Compose remains the recommended installation method.
-
-Earlier v1.2.1 artifacts and their qualification records remain historical
-evidence for their exact baseline; they do not qualify this development version.
-The existing builder security blocker remains unresolved. An eventual release
-requires a separately approved final artifact, applicable security qualification
-and publication verification. Historical tags, archives and evidence are preserved.
+The published v1.2.1 image was built from source commit
+`d358bb49cdf28ec278f7979e81fbd1fc36a35031`. Its tag, image, archives and
+qualification records remain historical evidence for those exact bytes.
+The v1.2.2 preparation does not overwrite or requalify them.
 
 # Zevyrn 1.2.0 — 2026-10-17
 

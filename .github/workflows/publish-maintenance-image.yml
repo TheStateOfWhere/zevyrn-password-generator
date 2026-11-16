@@ -1,0 +1,170 @@
+name: Publish qualified Zevyrn v1.2.2
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: Successful exact-source v1.2.2 qualification run (within 24 hours)
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  # One fixed publication lane; an absence check is not atomic tag immutability.
+  group: zevyrn-ghcr-v1.2.2-publication
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      archive_sha256: ${{ steps.packet.outputs.archive_sha256 }}
+      index_digest: ${{ steps.packet.outputs.index_digest }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QUALIFICATION_RUN: ${{ inputs.qualification_run_id }}
+      TRIVY_DISABLE_TELEMETRY: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: Verify exact tag and specific successful qualification run
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'TheStateOfWhere/zevyrn-password-generator'
+          test "$GITHUB_REF" = refs/tags/v1.2.2
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node scripts/release-integrity.mjs release-ref
+          test "$(node -p "require('./package.json').version")" = 1.2.2
+          [[ "$QUALIFICATION_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
+          mkdir -p validated
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN" > validated/run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN/jobs?filter=latest&per_page=100" > validated/jobs.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN/artifacts?per_page=100" > validated/artifacts.json
+          node scripts/release-integrity.mjs verify-run validated/run.json validated/jobs.json validated/artifacts.json validated/selection.json
+      - name: Download artifact by verified ID and authenticate the ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_id="$(jq -r .artifactId validated/selection.json)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/qualification.zip"
+          printf '%s  %s\n' "$(jq -r '.artifactDigest | sub("^sha256:"; "")' validated/selection.json)" "$RUNNER_TEMP/qualification.zip" | sha256sum --check --strict
+          node scripts/release-integrity.mjs zip-members "$RUNNER_TEMP/qualification.zip"
+          mkdir validated/packet
+          unzip -q "$RUNNER_TEMP/qualification.zip" -d validated/packet
+      - name: Verify sealed archive, complete OCI scope and retained evidence
+        id: packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-integrity.mjs verify-packet validated/packet validated/selection.json
+          quality_run="$(jq -r .id validated/packet/quality-run.json)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run" > "$RUNNER_TEMP/quality-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/quality-jobs.json"
+          node scripts/release-integrity.mjs quality "$RUNNER_TEMP/quality-run.json" "$RUNNER_TEMP/quality-jobs.json"
+      - name: Fresh runtime scan without repository or registry write privileges
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz --output "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+          export TRIVY_CACHE_DIR="$RUNNER_TEMP/trivy-cache"
+          "$RUNNER_TEMP/trivy" image --download-db-only
+          "$RUNNER_TEMP/trivy" version --format json > validated/promotion-scanner-version.json
+          "$RUNNER_TEMP/trivy" image --input validated/packet/archive.oci.tar --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/runtime-raw.json"
+          node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises";import {assessTrivy} from "./scripts/ci-security.mjs";const result=assessTrivy(JSON.parse(await readFile(process.env.RUNNER_TEMP+"/runtime-raw.json","utf8")),"runtime");await writeFile("validated/promotion-runtime-scan.json",JSON.stringify(result,null,2)+"\n");if(result.blocked)process.exitCode=1;'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zevyrn-v1.2.2-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: validated/
+          if-no-files-found: error
+          retention-days: 14
+  promote:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: zevyrn-ghcr-publication
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QUALIFICATION_RUN: ${{ inputs.qualification_run_id }}
+      EXPECTED_ARCHIVE: ${{ needs.validate.outputs.archive_sha256 }}
+      EXPECTED_INDEX: ${{ needs.validate.outputs.index_digest }}
+      IMAGE: ghcr.io/thestateofwhere/zevyrn
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zevyrn-v1.2.2-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: validated
+      - name: Revalidate source, qualification and exact bytes after owner approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'TheStateOfWhere/zevyrn-password-generator'
+          test "$GITHUB_REF" = refs/tags/v1.2.2
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node scripts/release-integrity.mjs release-ref
+          [[ "$QUALIFICATION_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN" > "$RUNNER_TEMP/run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/jobs.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN/artifacts?per_page=100" > "$RUNNER_TEMP/artifacts.json"
+          node scripts/release-integrity.mjs verify-run "$RUNNER_TEMP/run.json" "$RUNNER_TEMP/jobs.json" "$RUNNER_TEMP/artifacts.json" "$RUNNER_TEMP/current-selection.json"
+          diff validated/selection.json "$RUNNER_TEMP/current-selection.json"
+          node scripts/release-integrity.mjs verify-packet validated/packet validated/selection.json
+          quality_run="$(jq -r .id validated/packet/quality-run.json)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run" > "$RUNNER_TEMP/quality-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$quality_run/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/quality-jobs.json"
+          node scripts/release-integrity.mjs quality "$RUNNER_TEMP/quality-run.json" "$RUNNER_TEMP/quality-jobs.json"
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE" validated/packet/archive.oci.tar | sha256sum --check --strict
+          test "$(jq -r .indexDigest validated/packet/identity.json)" = "$EXPECTED_INDEX"
+          node --input-type=module -e 'import {readFile} from "node:fs/promises";import assert from "node:assert/strict";const s=JSON.parse(await readFile("validated/promotion-scanner-version.json"));const r=JSON.parse(await readFile("validated/promotion-runtime-scan.json"));const age=Date.now()-Date.parse(s.VulnerabilityDB?.DownloadedAt);assert(s.Version==="0.76.0"&&s.VulnerabilityDB.Version===2&&age>=0&&age<=3600000);assert(r.blocked===false&&r.blockingVulnerabilities===0&&r.secrets===0);'
+      - name: Copy the qualified graph to the fixed new tag and verify anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          umask 077
+          auth="$RUNNER_TEMP/maintenance-registry-auth.json"
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo inspect --raw oci-archive:validated/packet/archive.oci.tar > "$RUNNER_TEMP/index.json"
+          printf '%s  %s\n' "${EXPECTED_INDEX#sha256:}" "$RUNNER_TEMP/index.json" | sha256sum --check --strict
+          # The check and push are not atomic. No competing publisher is permitted.
+          skopeo list-tags --authfile "$auth" "docker://$IMAGE" > "$RUNNER_TEMP/tags.json"
+          node scripts/release-integrity.mjs tags "$RUNNER_TEMP/tags.json"
+          skopeo copy --all --preserve-digests --authfile "$auth" --digestfile validated/published-digest.txt oci-archive:validated/packet/archive.oci.tar "docker://$IMAGE:1.2.2"
+          test "$(cat validated/published-digest.txt)" = "$EXPECTED_INDEX"
+          skopeo inspect --no-creds --raw "docker://$IMAGE:1.2.2" > validated/public-index.json
+          printf '%s  %s\n' "${EXPECTED_INDEX#sha256:}" validated/public-index.json | sha256sum --check --strict
+          skopeo copy --all --preserve-digests --src-no-creds --digestfile validated/public-digest.txt "docker://$IMAGE@$EXPECTED_INDEX" "oci:$RUNNER_TEMP/public-verification:qualified"
+          test "$(cat validated/public-digest.txt)" = "$EXPECTED_INDEX"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: zevyrn-v1.2.2-publication-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            validated/selection.json
+            validated/packet/qualification.json
+            validated/packet/identity.json
+            validated/promotion-runtime-scan.json
+            validated/promotion-scanner-version.json
+            validated/published-digest.txt
+            validated/public-index.json
+            validated/public-digest.txt
+          if-no-files-found: error
+          retention-days: 14

@@ -2,7 +2,7 @@
 
 **Secure passwords. Easy on the eyes.**
 
-Current application version: **1.2.1**.
+Current application version: **1.2.2**.
 
 Self-hosted password generation in your browser. Zevyrn provides Readable,
 Strong Random and Custom Policy profiles, single-password and batch views,
@@ -26,8 +26,8 @@ placement does not eliminate application, browser or dependency risks. See
 
 ## Install the prebuilt container (recommended)
 
-The qualified release image is `ghcr.io/thestateofwhere/zevyrn:1.2.1`
-for **Linux/amd64**. See the [v1.2.1 release](https://github.com/TheStateOfWhere/zevyrn-password-generator/releases/tag/v1.2.1)
+The proposed security-maintenance image is `ghcr.io/thestateofwhere/zevyrn:1.2.2`
+for **Linux/amd64**. It is not yet published or registry-verified. See the [v1.2.2 release](https://github.com/TheStateOfWhere/zevyrn-password-generator/releases/tag/v1.2.2)
 for publication status and the verified immutable digest. Use the commands below
 only after publication and verification; do not substitute an unverified image.
 
@@ -91,7 +91,7 @@ docker compose -p zevyrn -f compose.zevyrn.yaml build zevyrn
 docker compose -p zevyrn -f compose.zevyrn.yaml up -d --no-build --pull never --wait --wait-timeout 120
 ```
 
-The local image is `zevyrn:1.2.1-local`. Tests run during the build. A new source
+The local image is `zevyrn:1.2.2-local`. Tests run during the build. A new source
 build is a different artifact and does not inherit the retained release image's
 qualification. Do not bypass tests or pinned inputs.
 Project metadata is verified against exact Git LF bytes; an ordinary checkout
