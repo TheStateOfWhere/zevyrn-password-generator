@@ -103,7 +103,7 @@ test('runtime port reset uses the complete patched pinned filesystem without own
   assert.match(dockerfile, /^FROM nginx:1\.30\.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5 AS runtime-rootfs$/m);
   const [before, final] = dockerfile.split(/^FROM scratch AS runtime$/m);
   assert.ok(final, 'a fresh final configuration must not inherit the base ExposedPorts');
-  assert.match(before, /RUN apk add --no-cache --upgrade \\\n\s+libexpat=2\.9\.0-r0 zlib=1\.3\.2-r1/);
+  assert.match(before, /RUN apk add --no-cache --upgrade \\\n\s+'libexpat>=2\.10\.0-r0' 'zlib>=1\.4-r0'/);
   assert.match(before, /COPY nginx\.conf \/etc\/nginx\/nginx\.conf/);
   assert.match(before, /COPY --from=build --chown=10001:10001 \/app\/dist \/usr\/share\/nginx\/html/);
   assert.deepEqual(final.match(/^COPY .+$/gm), ['COPY --from=runtime-rootfs / /']);
@@ -111,9 +111,14 @@ test('runtime port reset uses the complete patched pinned filesystem without own
   assert.deepEqual(final.match(/^EXPOSE .+$/gm), ['EXPOSE 8080']);
 });
 
-test('runtime HIGH fixes pin libx11 and Brotli without removing dependencies or expanding APK upgrades', async () => {
+test('runtime HIGH fixes retain minimum security versions without removing dependencies or expanding APK upgrades', async () => {
   const dockerfile = await read('Dockerfile');
-  const expected = 'RUN apk add --no-cache --upgrade \\\n      libexpat=2.9.0-r0 zlib=1.3.2-r1 libx11=1.8.14-r0 brotli-libs=1.2.1-r0 curl=8.23.0-r0 libcurl=8.23.0-r0';
+  const expected = [
+    'RUN apk add --no-cache --upgrade \\',
+    "    'libexpat>=2.10.0-r0' 'zlib>=1.4-r0' \\",
+    "    'libx11>=1.8.14-r0' 'brotli-libs>=1.2.1-r0' \\",
+    "    'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0'",
+  ].join('\n');
   const verify = text => {
     const stage = text.split(/^FROM nginx:[^\n]+ AS runtime-rootfs$/m)[1]?.split(/^FROM scratch AS runtime$/m)[0];
     assert.ok(stage, 'the existing pinned runtime stages must remain');
@@ -122,23 +127,23 @@ test('runtime HIGH fixes pin libx11 and Brotli without removing dependencies or 
   };
   verify(dockerfile);
   for (const changed of [
-    dockerfile.replace(' curl=8.23.0-r0', ''),
-    dockerfile.replace(' curl=8.23.0-r0', ' curl=8.22.0-r0'),
-    dockerfile.replace(' curl=8.23.0-r0', ' curl'),
-    dockerfile.replace(' libcurl=8.23.0-r0', ''),
-    dockerfile.replace(' libcurl=8.23.0-r0', ' libcurl=8.22.0-r0'),
-    dockerfile.replace(' libcurl=8.23.0-r0', ' libcurl'),
-    dockerfile.replace(' brotli-libs=1.2.1-r0', ''),
-    dockerfile.replace('brotli-libs=1.2.1-r0', 'brotli-libs=1.2.0-r1'),
-    dockerfile.replace('brotli-libs=1.2.1-r0', 'brotli-libs'),
-    dockerfile.replace(' libx11=1.8.14-r0', ''),
-    dockerfile.replace('libx11=1.8.14-r0', 'libx11=1.8.13-r0'),
-    dockerfile.replace('libx11=1.8.14-r0', 'libx11'),
-    dockerfile.replace('libx11=1.8.14-r0', 'libx11=1.8.14-r0 libxpm'),
+    ...[
+      ['libexpat','2.10.0-r0','2.9.0-r0'],
+      ['zlib','1.4-r0','1.3.2-r1'],
+      ['libx11','1.8.14-r0','1.8.13-r0'],
+      ['brotli-libs','1.2.1-r0','1.2.0-r1'],
+      ['curl','8.23.0-r0','8.22.0-r0'],
+      ['libcurl','8.23.0-r0','8.22.0-r0'],
+    ].flatMap(([name,minimum,older]) => {
+      const constraint = "'"+name+'>='+minimum+"'";
+      return ['',name,"'"+name+'>='+older+"'"].map(replacement => dockerfile.replace(constraint,replacement));
+    }),
+    dockerfile.replace("'libx11>=1.8.14-r0'", "'libx11>=1.8.14-r0' libxpm"),
     dockerfile.replace(expected, expected+'\nRUN apk upgrade'),
     dockerfile.replace(expected, expected+'\nRUN apk del libx11'),
     dockerfile.replace('--no-cache --upgrade', '--no-cache --upgrade --allow-untrusted'),
     dockerfile.replace('--no-cache --upgrade', '--no-cache --upgrade --repository https://dl-cdn.alpinelinux.org/alpine/edge/main'),
+    dockerfile.replace('--no-cache --upgrade', '--no-cache --upgrade --repositories-file /tmp/repositories'),
   ]) assert.throws(() => verify(changed));
 });
 
