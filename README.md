@@ -26,15 +26,17 @@ placement does not eliminate application, browser or dependency risks. See
 
 ## Install the prebuilt container (recommended)
 
-The proposed security-maintenance image is `ghcr.io/thestateofwhere/zevyrn:1.2.2`
-for **Linux/amd64**. It is not yet published or registry-verified. See the [v1.2.2 release](https://github.com/TheStateOfWhere/zevyrn-password-generator/releases/tag/v1.2.2)
-for publication status and the verified immutable digest. Use the commands below
-only after publication and verification; do not substitute an unverified image.
+The published security-maintenance image is `ghcr.io/thestateofwhere/zevyrn:1.2.2`
+for **Linux/amd64**, from source commit `76696d1d573feaa455ca31a00c9e86a3c6f08c4e`.
+Verified immutable OCI index: `sha256:4992d66fcbc8a73723f2cf9a65eba86f4c4048acdf8359032895ae5e5d4fca31`.
+See [release notes](RELEASE-NOTES.md) and the successful
+[publication run](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/44033904930).
+Public image availability does not make public-facing deployment supported.
 
 Use a maintained Docker Engine 28 or newer (or Docker Desktop in Linux-container
 mode) and Docker Compose v2 or newer with `--wait` and `--wait-timeout`. Git, Node.js, npm
 and Buildx are not needed to run the prebuilt image. Download
-[`compose.ghcr.yaml`](compose.ghcr.yaml) from the intended published release into
+[`compose.ghcr.yaml`](https://github.com/TheStateOfWhere/zevyrn-password-generator/blob/v1.2.2/compose.ghcr.yaml) from the v1.2.2 tag into
 an otherwise empty directory. Commands use a POSIX shell; use your existing
 Docker access method, including `sudo` if required.
 
@@ -96,8 +98,8 @@ build is a different artifact and does not inherit the retained release image's
 qualification. Do not bypass tests or pinned inputs.
 Project metadata is verified against exact Git LF bytes; an ordinary checkout
 needs no historical qualification workspace or line-ending conversion. The
-Docker build needs no host Python or Node installation. This correction does
-not resolve the existing builder security blocker or authorize a release.
+Docker build needs no host Python or Node installation. A successful source
+build alone does not qualify an image for publication.
 
 ## HTTPS: choose Traefik or Caddy
 

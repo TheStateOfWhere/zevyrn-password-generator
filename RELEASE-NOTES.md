@@ -1,4 +1,4 @@
-# Zevyrn 1.2.2 — unreleased security maintenance
+# Zevyrn 1.2.2 — security maintenance — 2026-11-17
 
 - Incorporates the runtime package maintenance validated at
   `7b82c4970b7c724c030a8c1da9d43981d09cc76c`.
@@ -10,8 +10,27 @@ Application behavior, password generation, dictionary, UI layout, runtime
 configuration, security gates and the three approved builder-only exceptions
 are unchanged. The visible version text changes to v1.2.2.
 
-No v1.2.2 image or release is published. A committed release candidate, fresh
-image qualification and separate publication approval are required.
+Published image: `ghcr.io/thestateofwhere/zevyrn:1.2.2` (Linux/amd64).
+Source commit: `76696d1d573feaa455ca31a00c9e86a3c6f08c4e`.
+Immutable OCI index: `sha256:4992d66fcbc8a73723f2cf9a65eba86f4c4048acdf8359032895ae5e5d4fca31`.
+
+[Final-source qualification](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/44031484596)
+passed application/configuration checks, exact OCI and asset identity validation,
+builder/runtime vulnerability and secret scans, runtime SBOM generation, hardened
+runtime checks and all eight Microsoft Edge browser suites. The
+[protected publication](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/44033904930)
+rescanned and published that qualified OCI archive without rebuilding it.
+
+At publication, the runtime had zero HIGH/CRITICAL findings and no detected
+secrets, including image-configuration secrets. One MEDIUM finding remained:
+`CVE-2026-94287` in `libxpm 3.5.19-r0` (reported fix: `3.5.20-r0`).
+Three scoped builder-only HIGH findings in npm-bundled Undici 6.29.0 remained
+visible under the existing approved policy; they are outside the shipped runtime.
+See [security policy and limitations](SECURITY.md#published-release-qualification).
+These dated results are not a guarantee against future findings.
+
+Supported deployment remains private/internal networks or localhost only.
+No intended application feature or configuration changes accompany this release.
 
 # Zevyrn 1.2.1 — published 2026-10-27
 

@@ -38,5 +38,30 @@ for your deployment. A successful build or earlier clean scan is not proof of
 vulnerability freedom. Do not bypass build tests, float pinned inputs to work
 around errors, or commit secrets and certificate keys.
 
-A [builder-versus-runtime policy proposal](docs/release-security-policy-proposal.md)
-is available for review only. It is not active policy and approves no exception.
+## Published release qualification
+
+The v1.2.2 [qualification workflow](.github/workflows/qualify-maintenance-image.yml)
+binds source commit/tree, an exact Linux/amd64 OCI archive, runtime assets,
+builder/runtime vulnerability and secret scans, image-configuration secret scans,
+runtime SBOM, hardened runtime checks and eight Microsoft Edge browser suites.
+The [protected publication workflow](.github/workflows/publish-maintenance-image.yml)
+verifies the retained evidence, performs fresh runtime scanning and promotes the
+same OCI archive without rebuilding it. See [release notes](RELEASE-NOTES.md)
+for the published source, digest and successful public workflow records.
+
+Runtime HIGH/CRITICAL findings or detected secrets block acceptance. Builder
+CRITICAL findings, detected secrets and unapproved HIGH findings also block.
+The three exact builder-only Undici 6.29.0 HIGH exceptions are recorded in
+[the active CI exception policy](scripts/ci-builder-exceptions.json):
+`CVE-2026-109869`, `CVE-2026-109383` and `CVE-2026-87018`.
+They do not apply to the runtime or other package/version/path occurrences,
+and accepted findings remain visible rather than being removed from reports.
+
+At publication on 2026-11-17, the runtime had no HIGH/CRITICAL findings or
+detected secrets, but retained MEDIUM `CVE-2026-94287` in `libxpm 3.5.19-r0`
+(reported fix: `3.5.20-r0`). These are dated scan results, not a claim of
+vulnerability freedom or current clearance for a different build.
+
+The historical [builder-versus-runtime policy proposal](docs/release-security-policy-proposal.md)
+remains a proposal, not active policy or an exception approval. Its historical
+HOLD statements do not describe the published v1.2.2 qualification result.

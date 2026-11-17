@@ -37,16 +37,18 @@ source build, or one complete Zevyrn Traefik/Caddy file for HTTPS. Do not combin
 these files. Existing installations keep their original files; the default
 `compose.yaml` deliberately uses legacy names.
 
-Planned public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.2`**, Linux/amd64.
-**Not yet published or registry-verified during release preparation.** Use these
-instructions after the release image and its registry digest are published.
-A local Docker image ID is not a registry manifest digest.
+Published public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.2`**, Linux/amd64.
+Verified immutable OCI index:
+`sha256:4992d66fcbc8a73723f2cf9a65eba86f4c4048acdf8359032895ae5e5d4fca31`.
+The repository and image are public; running instances must remain private/internal.
+Use the registry digest for immutable selection; do not substitute a local image ID.
 
 Requirements: maintained Docker Engine 28+ or Docker Desktop using Linux
 containers, and Docker Compose v2 or newer supporting `--wait` and `--wait-timeout`.
 No host Node/npm, source checkout, database or persistent app volume is needed.
-Download `compose.ghcr.yaml` from the intended published release into a new
-directory. It contains only the `zevyrn` app service, no build directive, Docker
+Download [`compose.ghcr.yaml`](https://github.com/TheStateOfWhere/zevyrn-password-generator/blob/v1.2.2/compose.ghcr.yaml)
+from the v1.2.2 tag into a new directory. It contains only the `zevyrn` app
+service, no build directive, Docker
 socket, host bind mounts or external networks. Commands use a POSIX shell.
 Use your existing Docker access method; do not change daemon permissions.
 
@@ -71,12 +73,16 @@ ZEVYRN_PORT=18080
 ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.2
 ```
 
-Use an explicit version rather than `latest`. For immutable selection, replace
-the image with `ghcr.io/thestateofwhere/zevyrn@sha256:<published-manifest-digest>`
-after obtaining the real manifest digest from the release. The placeholder is
-not runnable. Shell variables override `.env`; keep the same settings for every
-command. Public GHCR packages can be pulled anonymously once made public.
-Registry access is needed for the initial pull and updates.
+Use an explicit version rather than `latest`. For immutable selection, use this
+alternative `.env` value:
+
+```dotenv
+ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.2@sha256:4992d66fcbc8a73723f2cf9a65eba86f4c4048acdf8359032895ae5e5d4fca31
+```
+
+Shell variables override `.env`; keep the same settings for every command.
+The published image can be pulled anonymously. Registry access is needed for
+the initial pull and updates.
 
 ### Access from other internal devices
 
@@ -169,8 +175,9 @@ qualification archives are not build prerequisites. Manually converted CRLF
 or altered files fail closed.
 
 This contract is distinct from reproducing the old qualified CRLF artifact.
-Development tests do not qualify a newly built image; the existing builder
-security blocker remains unresolved.
+Development tests alone do not qualify a newly built image. Published v1.2.2
+passed the release qualification and approved builder policy described in
+[SECURITY.md](SECURITY.md#published-release-qualification).
 
 ## Choose a hostname and client trust
 
@@ -332,7 +339,7 @@ curl --fail http://127.0.0.1:18080/healthz
 ```
 
 - **Image cannot be pulled:** confirm publication/public visibility, exact name,
-  version and architecture. The planned v1.2.2 image is not yet public-verified.
+  version and architecture. The v1.2.2 image is publicly retrievable for Linux/amd64.
 - **Port already allocated:** choose another `ZEVYRN_PORT`, run `config` again,
   and use that port in your browser/health request. Do not stop unrelated apps.
 - **Exited/restarting:** inspect the exit code, `OOMKilled`, error and bounded
@@ -349,8 +356,8 @@ curl --fail http://127.0.0.1:18080/healthz
   browser guidance. Do not disable browser protections or certificate checks.
 - **Build integrity failure:** use a clean reviewed checkout with Git LF bytes;
   do not rewrite hashes, normalize installed compiler packages or skip tests.
-  If an exact pinned Alpine package is unavailable, report it rather than
-  substituting a floating version.
+  If a required Alpine security floor cannot be satisfied, report it rather than
+  changing the approved floor or package sources.
 
 `unless-stopped` restarts an exited process; it does not itself restart a
 container merely because it becomes unhealthy. Diagnose the failed probe first.
