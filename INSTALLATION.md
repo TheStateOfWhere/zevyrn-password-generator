@@ -1,6 +1,6 @@
 # Docker installation
 
-These instructions target **Zevyrn v1.2.1** from the
+These instructions target **Zevyrn v1.2.2** from the
 [canonical GitHub repository](https://github.com/TheStateOfWhere/zevyrn-password-generator).
 See the [rename notes](docs/REPOSITORY-RENAME.md) for the completed repository
 rename and retained configuration identifiers.
@@ -37,7 +37,7 @@ source build, or one complete Zevyrn Traefik/Caddy file for HTTPS. Do not combin
 these files. Existing installations keep their original files; the default
 `compose.yaml` deliberately uses legacy names.
 
-Planned public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.1`**, Linux/amd64.
+Planned public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.2`**, Linux/amd64.
 **Not yet published or registry-verified during release preparation.** Use these
 instructions after the release image and its registry digest are published.
 A local Docker image ID is not a registry manifest digest.
@@ -68,7 +68,7 @@ Optional `.env` entries (the app requires no environment configuration):
 
 ```dotenv
 ZEVYRN_PORT=18080
-ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.1
+ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.2
 ```
 
 Use an explicit version rather than `latest`. For immutable selection, replace
@@ -155,7 +155,7 @@ OS clipboard history. Browsers/extensions and the OS remain trust dependencies.
 
 The remaining sections describe developer build examples. Build from source as
 shown in [README.md](README.md); `compose.zevyrn*.yaml` uses the local
-`zevyrn:1.2.1-local` image, not GHCR. It needs Git and Buildx, with registry,
+`zevyrn:1.2.2-local` image, not GHCR. It needs Git and Buildx, with registry,
 npm and Alpine access for the first build. A new build does not inherit the
 retained release image's qualification. The standalone default needs no
 environment file. For remote browsers, choose an HTTPS alternative below.
@@ -332,7 +332,7 @@ curl --fail http://127.0.0.1:18080/healthz
 ```
 
 - **Image cannot be pulled:** confirm publication/public visibility, exact name,
-  version and architecture. The planned v1.2.1 image is not yet public-verified.
+  version and architecture. The planned v1.2.2 image is not yet public-verified.
 - **Port already allocated:** choose another `ZEVYRN_PORT`, run `config` again,
   and use that port in your browser/health request. Do not stop unrelated apps.
 - **Exited/restarting:** inspect the exit code, `OOMKilled`, error and bounded
@@ -438,7 +438,7 @@ The original `compose.yaml`, `compose.traefik.yaml`, `compose.caddy.yaml`,
 network support boundary also applies to these examples. Keep the same project,
 service, `KEYSMITH_*` settings, external certificates and any operator-specific
 proxy configuration. The local image name `keysmith:1.0.0-local` is a retained
-compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.1.
+compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.2.
 Do not switch to a Zevyrn project/service as an ordinary update: Compose would
 create a separate installation and may conflict on ports. No migration is required.
 
