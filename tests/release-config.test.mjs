@@ -100,7 +100,7 @@ test('builder verifies frozen artifact bytes and identity before npm installatio
 
 test('runtime port reset uses the complete patched pinned filesystem without ownership overrides', async () => {
   const dockerfile = await read('Dockerfile');
-  assert.match(dockerfile, /^FROM nginx:1\.30\.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5 AS runtime-rootfs$/m);
+  assert.match(dockerfile, /^FROM nginx:1\.30\.8-alpine@sha256:6437a63b5c529f0e06162b3f593c0154cff6fa2ea0f94fd7c27928cb399e022d AS runtime-rootfs$/m);
   const [before, final] = dockerfile.split(/^FROM scratch AS runtime$/m);
   assert.ok(final, 'a fresh final configuration must not inherit the base ExposedPorts');
   assert.match(before, /RUN apk add --no-cache --upgrade \\\n\s+'libexpat>=2\.10\.0-r0' 'zlib>=1\.4-r0'/);
@@ -118,7 +118,8 @@ test('runtime HIGH fixes retain minimum security versions without removing depen
     "    'libexpat>=2.10.0-r0' 'zlib>=1.4-r0' \\",
     "    'libx11>=1.8.14-r0' 'brotli-libs>=1.2.1-r0' \\",
     "    'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' \\",
-    "    'libxslt>=1.1.43-r4' 'musl-utils>=1.2.6-r3'",
+    "    'libxslt>=1.1.43-r4' 'musl-utils>=1.2.6-r3' \\",
+    "    'libxml2>=2.13.9-r3'",
   ].join('\n');
   const verify = text => {
     const stage = text.split(/^FROM nginx:[^\n]+ AS runtime-rootfs$/m)[1]?.split(/^FROM scratch AS runtime$/m)[0];
@@ -137,6 +138,7 @@ test('runtime HIGH fixes retain minimum security versions without removing depen
       ['libcurl','8.23.0-r0','8.22.0-r0'],
       ['libxslt','1.1.43-r4','1.1.43-r3'],
       ['musl-utils','1.2.6-r3','1.2.6-r2'],
+      ['libxml2','2.13.9-r3','2.13.9-r2'],
     ].flatMap(([name,minimum,older]) => {
       const constraint = "'"+name+'>='+minimum+"'";
       return ['',name,"'"+name+'>='+older+"'"].map(replacement => dockerfile.replace(constraint,replacement));
@@ -156,8 +158,8 @@ test('fresh runtime configuration preserves pinned base environment and graceful
   const env = final.match(/^ENV (?:.*\\\n)*.*$/m)?.[0].replace(/\\\n\s*/g, ' ').slice(4).trim().split(/\s+/);
   assert.deepEqual(env, [
     'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-    'NGINX_VERSION=1.30.6', 'PKG_RELEASE=1', 'DYNPKG_RELEASE=1',
-    'NJS_VERSION=1.0.2', 'NJS_RELEASE=1', 'ACME_VERSION=0.4.1',
+    'NGINX_VERSION=1.30.8', 'PKG_RELEASE=1', 'DYNPKG_RELEASE=1',
+    'NJS_VERSION=1.0.2', 'NJS_RELEASE=1', 'ACME_VERSION=0.4.2',
   ]);
   assert.match(final, /^WORKDIR \/$/m);
   assert.match(final, /^STOPSIGNAL SIGQUIT$/m);

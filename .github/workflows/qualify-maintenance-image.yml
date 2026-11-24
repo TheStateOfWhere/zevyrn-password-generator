@@ -117,8 +117,8 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/release-integrity.mjs prepare-scan artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json
-      - name: Fresh builder and verified runtime security scans
-        id: security
+      - name: Verified scanner and fresh vulnerability database
+        id: scanner
         shell: bash
         run: |
           set -euo pipefail
@@ -128,19 +128,48 @@ jobs:
           export TRIVY_CACHE_DIR="$RUNNER_TEMP/trivy-cache"
           "$RUNNER_TEMP/trivy" image --download-db-only
           "$RUNNER_TEMP/trivy" version --format json > artifacts/release/packet/scanner-version.json
+      - name: Scan verified runtime vulnerabilities and secrets
+        id: runtime_scan
+        if: ${{ !cancelled() && steps.scan_archive.outcome == 'success' && steps.scanner.outcome == 'success' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
           node scripts/release-integrity.mjs scan-runtime "$RUNNER_TEMP/trivy" artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json "$RUNNER_TEMP/runtime-raw.json"
+          node scripts/ci-security.mjs report runtime "$RUNNER_TEMP/runtime-raw.json" artifacts/release/packet/runtime-scan.json
+      - name: Scan builder vulnerabilities and secrets
+        id: builder_scan
+        if: ${{ !cancelled() && steps.scan_archive.outcome == 'success' && steps.scanner.outcome == 'success' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
           "$RUNNER_TEMP/trivy" image --input "$RUNNER_TEMP/builder.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/builder-raw.json"
-          node scripts/ci-security.mjs trivy "$RUNNER_TEMP/runtime-raw.json" artifacts/release/packet/runtime-scan.json "$RUNNER_TEMP/builder-raw.json" artifacts/release/packet/builder-scan.json
+          node scripts/ci-security.mjs report builder "$RUNNER_TEMP/builder-raw.json" artifacts/release/packet/builder-scan.json
           sha256sum "$RUNNER_TEMP/builder.tar" | cut -d ' ' -f 1 > "$RUNNER_TEMP/builder.sha256"
           node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises";const p="artifacts/release/packet/",i=JSON.parse(await readFile(p+"identity.json")),b=JSON.parse(await readFile(process.env.RUNNER_TEMP+"/builder-raw.json"));await writeFile(p+"builder-identity.json",JSON.stringify({sourceCommit:i.sourceCommit,sourceTree:i.sourceTree,imageID:b.Metadata.ImageID,archiveSHA256:(await readFile(process.env.RUNNER_TEMP+"/builder.sha256","utf8")).trim()},null,2)+"\n");'
       - name: Generate runtime SBOM from the same verified scan archive
         id: sbom
+        if: ${{ !cancelled() && steps.runtime_scan.outcome == 'success' }}
         shell: bash
         env:
           TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
           set -euo pipefail
-          node scripts/release-integrity.mjs sbom-runtime "$RUNNER_TEMP/trivy" artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json artifacts/release/packet/runtime-sbom.cdx.json
+          node scripts/release-integrity.mjs sbom-runtime "$RUNNER_TEMP/trivy" artifacts/release/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/release/packet/runtime-scan-identity.json "$RUNNER_TEMP/runtime-sbom.cdx.json"
+          node scripts/ci-security.mjs sbom "$RUNNER_TEMP/runtime-sbom.cdx.json" "$RUNNER_TEMP/runtime-raw.json" artifacts/release/packet/runtime-sbom.cdx.json
+      - name: Final security acceptance
+        id: security
+        if: ${{ !cancelled() && steps.scan_archive.outcome == 'success' }}
+        run: |
+          test '${{ steps.runtime_scan.outcome }}' = success
+          test '${{ steps.builder_scan.outcome }}' = success
+          test '${{ steps.sbom.outcome }}' = success
+          node scripts/ci-security.mjs trivy "$RUNNER_TEMP/runtime-raw.json" artifacts/release/packet/runtime-scan.json "$RUNNER_TEMP/builder-raw.json" artifacts/release/packet/builder-scan.json
+      - name: Actionable sanitized security summary
+        if: always()
+        env:
+          SECURITY_STAGES: >-
+            {"scanner":"${{ steps.scanner.outcome }}","runtimeScan":"${{ steps.runtime_scan.outcome }}","builderScan":"${{ steps.builder_scan.outcome }}","sbom":"${{ steps.sbom.outcome }}","security":"${{ steps.security.outcome }}"}
+        run: node scripts/ci-security.mjs summary artifacts/release/packet "$SECURITY_STAGES"
       - name: Hardened execution of the image derived from the archive
         id: hardening
         shell: bash
@@ -156,7 +185,7 @@ jobs:
           test "$(docker exec zevyrn-release-health wget -qO- http://127.0.0.1:8080/healthz)" = ok
           docker exec zevyrn-release-health nginx -t
           docker exec zevyrn-release-health sh -ec 'test "$(id -u)" = 10001; ! command -v node; ! command -v npm; ! test -d /app/node_modules'
-          for spec in libexpat=2.10.0-r0 zlib=1.4-r0 libx11=1.8.14-r0 brotli-libs=1.2.1-r0 curl=8.23.0-r0 libcurl=8.23.0-r0 libxslt=1.1.43-r4 musl-utils=1.2.6-r3; do
+          for spec in libexpat=2.10.0-r0 zlib=1.4-r0 libx11=1.8.14-r0 brotli-libs=1.2.1-r0 curl=8.23.0-r0 libcurl=8.23.0-r0 libxslt=1.1.43-r4 musl-utils=1.2.6-r3 libxml2=2.13.9-r3 nginx=1.30.8-r1; do
             installed="$(jq -r --arg name "${spec%%=*}" '[.components[] | select(.name == $name) | .version] | if length == 1 then .[0] else error("Missing or duplicate runtime package") end' artifacts/release/packet/runtime-sbom.cdx.json)"
             test -n "$installed"
             test "$(docker exec zevyrn-release-health apk version -t "$installed" "${spec#*=}")" != '<'
@@ -173,7 +202,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Collect sanitized failed-archive diagnostics
-        if: ${{ failure() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}
+        if: failure()
         shell: bash
         env:
           DIAGNOSTIC_STAGES: >-
@@ -181,13 +210,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/release/diagnostics
+          for report in runtime-scan.json builder-scan.json scanner-version.json runtime-sbom.cdx.json npm-audit.json summary.md; do
+            if test -f "artifacts/release/packet/$report"; then cp "artifacts/release/packet/$report" artifacts/release/diagnostics/; fi
+          done
           node scripts/release-integrity.mjs diagnostics artifacts/release/packet/archive.oci.tar artifacts/release/packet/build-metadata.json artifacts/release/diagnostics/archive.json
       - name: Retain non-promotable failure diagnostics only
-        if: ${{ failure() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}
+        if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zevyrn-v1.2.2-failed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/release/diagnostics/*.json
+          path: |
+            artifacts/release/diagnostics/*.json
+            artifacts/release/diagnostics/summary.md
           if-no-files-found: error
           retention-days: 7
   browser:

@@ -75,7 +75,8 @@ jobs:
           sudo apt-get install --yes --no-install-recommends skopeo
           skopeo copy --override-os linux --override-arch amd64 oci-archive:validated/packet/archive.oci.tar docker-daemon:zevyrn-promotion-scan:1.2.2
           node scripts/release-integrity.mjs prepare-scan validated/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" validated/promotion-scan-identity.json
-      - name: Fresh runtime scan without repository or registry write privileges
+      - name: Verified scanner and fresh vulnerability database
+        id: scanner
         shell: bash
         run: |
           set -euo pipefail
@@ -85,8 +86,35 @@ jobs:
           export TRIVY_CACHE_DIR="$RUNNER_TEMP/trivy-cache"
           "$RUNNER_TEMP/trivy" image --download-db-only
           "$RUNNER_TEMP/trivy" version --format json > validated/promotion-scanner-version.json
+      - name: Fresh runtime scan without repository or registry write privileges
+        id: runtime_scan
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
           node scripts/release-integrity.mjs scan-runtime "$RUNNER_TEMP/trivy" validated/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" validated/promotion-scan-identity.json "$RUNNER_TEMP/runtime-raw.json"
-          node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises";import {assessTrivy} from "./scripts/ci-security.mjs";const result=assessTrivy(JSON.parse(await readFile(process.env.RUNNER_TEMP+"/runtime-raw.json","utf8")),"runtime");await writeFile("validated/promotion-runtime-scan.json",JSON.stringify(result,null,2)+"\n");if(result.blocked)process.exitCode=1;'
+          node scripts/ci-security.mjs report runtime "$RUNNER_TEMP/runtime-raw.json" validated/promotion-runtime-scan.json
+      - name: Final runtime security acceptance
+        id: security
+        run: |
+          node --input-type=module -e 'import {readFile} from "node:fs/promises";const r=JSON.parse(await readFile("validated/promotion-runtime-scan.json"));if(r.blocked!==false||r.blockingVulnerabilities!==0||r.secrets!==0){console.error("VULNERABILITY_OR_SECRET_POLICY: runtime acceptance blocked");process.exitCode=1;}'
+      - name: Actionable sanitized security summary
+        if: always()
+        env:
+          SECURITY_STAGES: >-
+            {"scanner":"${{ steps.scanner.outcome }}","runtimeScan":"${{ steps.runtime_scan.outcome }}","security":"${{ steps.security.outcome }}"}
+        run: node scripts/ci-security.mjs summary validated "$SECURITY_STAGES" promotion
+      - name: Preserve sanitized validation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zevyrn-v1.2.2-validation-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            validated/promotion-runtime-scan.json
+            validated/promotion-scanner-version.json
+            validated/promotion-scan-identity.json
+            validated/summary.md
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zevyrn-v1.2.2-validated-${{ github.run_id }}-${{ github.run_attempt }}

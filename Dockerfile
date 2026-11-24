@@ -21,7 +21,7 @@ COPY compose.zevyrn.yaml compose.zevyrn.traefik.yaml compose.zevyrn.caddy.yaml z
 COPY examples ./examples
 RUN npm test
 
-FROM nginx:1.30.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5 AS runtime-rootfs
+FROM nginx:1.30.8-alpine@sha256:6437a63b5c529f0e06162b3f593c0154cff6fa2ea0f94fd7c27928cb399e022d AS runtime-rootfs
 # Upgrade only existing Alpine 3.24 runtime packages requiring newer fixes.
 # Minimum security versions allow newer fixes without changing Alpine branches.
 # Patch libx11 inherited through Nginx's retained image-filter dependencies.
@@ -29,7 +29,8 @@ RUN apk add --no-cache --upgrade \
     'libexpat>=2.10.0-r0' 'zlib>=1.4-r0' \
     'libx11>=1.8.14-r0' 'brotli-libs>=1.2.1-r0' \
     'curl>=8.23.0-r0' 'libcurl>=8.23.0-r0' \
-    'libxslt>=1.1.43-r4' 'musl-utils>=1.2.6-r3'
+    'libxslt>=1.1.43-r4' 'musl-utils>=1.2.6-r3' \
+    'libxml2>=2.13.9-r3'
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY --from=build --chown=10001:10001 /app/dist /usr/share/nginx/html
 
@@ -39,8 +40,8 @@ FROM scratch AS runtime
 COPY --from=runtime-rootfs / /
 # Preserve the pinned base's environment, working directory and shutdown signal.
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    NGINX_VERSION=1.30.6 PKG_RELEASE=1 DYNPKG_RELEASE=1 \
-    NJS_VERSION=1.0.2 NJS_RELEASE=1 ACME_VERSION=0.4.1
+    NGINX_VERSION=1.30.8 PKG_RELEASE=1 DYNPKG_RELEASE=1 \
+    NJS_VERSION=1.0.2 NJS_RELEASE=1 ACME_VERSION=0.4.2
 WORKDIR /
 STOPSIGNAL SIGQUIT
 LABEL maintainer="NGINX Docker Maintainers <docker-maint@nginx.com>" \

@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {assessNpm,assessTrivy} from '../scripts/ci-security.mjs';
+import {assessNpm,assessTrivy,validateBuilderAcceptance,validateRuntimeSBOM,sanitizedRuntimeSBOM,securitySummary} from '../scripts/ci-security.mjs';
 
 // Compact fixtures use the actual Trivy 0.76.0 image-report field structure.
 const runtime=()=>({SchemaVersion:2,ArtifactType:'container_image',Trivy:{Version:'0.76.0'},
@@ -32,6 +32,60 @@ function reviewedBuilder() {
   }));
   return report;
 }
+
+test('zero through three remaining authorized builder HIGH occurrences are accepted',()=>{
+  for(let count=0;count<=3;count++) {
+    const report=reviewedBuilder();report.Results[1].Vulnerabilities.length=count;
+    const summary=assessTrivy(report,'builder',exceptionPolicy);
+    assert.equal(summary.approvedHighCount,count);assert.equal(summary.blocked,false);
+    validateBuilderAcceptance(summary,exceptionPolicy);
+    for(const change of [s=>s.approvedHighCount++,s=>s.rawBlockingVulnerabilities++,s=>s.secrets++,s=>s.blocked=true]) {
+      const changed=structuredClone(summary);change(changed);assert.throws(()=>validateBuilderAcceptance(changed,exceptionPolicy));
+    }
+  }
+});
+
+test('retained builder dispositions cannot authorize tampered, duplicate or out-of-scope occurrences',()=>{
+  const summary=assessTrivy(reviewedBuilder(),'builder',exceptionPolicy);
+  for(const change of [
+    s=>s.results[1].vulnerabilities[0].id='CVE-2099-99999',
+    s=>s.results[1].vulnerabilities[0].installed='6.29.1',
+    s=>s.results[1].vulnerabilities[0].path='app/node_modules/undici/package.json',
+    s=>s.results[1].vulnerabilities[0].package='other',
+    s=>s.results[1].vulnerabilities[0].severity='CRITICAL',
+    s=>s.results[1].vulnerabilities[0].exception.reviewReference='self-approved',
+    s=>s.results[1].vulnerabilities[0].severity='LOW',
+    s=>s.results[1].type='alpine',
+    s=>s.results[1].vulnerabilities.push(structuredClone(s.results[1].vulnerabilities[0])),
+    s=>delete s.results
+  ]) {const changed=structuredClone(summary);change(changed);assert.throws(()=>validateBuilderAcceptance(changed,exceptionPolicy));}
+});
+
+test('runtime SBOM binds image identity and every discovered OS package',()=>{
+  const raw=runtime(),sbom={bomFormat:'CycloneDX',components:raw.Results[0].Packages.map(p=>({name:p.Name,version:p.Version})),metadata:{component:{properties:[{name:'aquasecurity:trivy:ImageID',value:raw.Metadata.ImageID}]}}};
+  assert.equal(validateRuntimeSBOM(sbom,raw).passed,true);
+  const labelled=structuredClone(sbom);labelled.metadata.component.properties.push({name:'aquasecurity:trivy:Labels:token',value:'never-publish-label-secret'});
+  const sanitized=sanitizedRuntimeSBOM(labelled,raw);
+  assert.doesNotMatch(JSON.stringify(sanitized),/never-publish-label-secret/);
+  assert.deepEqual(sanitized.components,sbom.components);assert.equal(validateRuntimeSBOM(sanitized,raw).passed,true);
+  for(const change of [s=>s.components.pop(),s=>s.components[0].version='other',s=>s.metadata.component.properties[0].value='sha256:'+'b'.repeat(64),s=>s.metadata.component.properties.push(s.metadata.component.properties[0]),s=>delete s.components,s=>s.bomFormat='other']) {
+    const changed=structuredClone(sbom);change(changed);assert.throws(()=>validateRuntimeSBOM(changed,raw));
+  }
+});
+
+test('security summaries distinguish findings, scanner, validation and SBOM failures without secret content',()=>{
+  const raw=runtime();raw.Results[0].Vulnerabilities=[{VulnerabilityID:'CVE-2026-113425',Severity:'CRITICAL',PkgName:'nginx',InstalledVersion:'1.30.6-r1',FixedVersion:'1.30.7-r0'}];
+  raw.Results.push({Target:'sensitive-fixture',Class:'secret',Secrets:[{RuleID:'fixture',Match:'sensitive-fixture',Title:'sensitive-fixture',Code:{Lines:[{Content:'sensitive-fixture'}]}}]});
+  const report={...assessTrivy(raw,'runtime'),imageID:raw.Metadata.ImageID};
+  const text=securitySummary({runtime:report,builder:{classification:'INVALID_EVIDENCE'}},{Version:'0.76.0',VulnerabilityDB:{UpdatedAt:'2026-11-24T00:00:00Z'}},{sbom:'failure'});
+  assert.match(text,/SECRET_FINDING/);assert.match(text,/CVE-2026-113425.*CRITICAL.*nginx.*1.30.6-r1.*1.30.7-r0.*blocking/);
+  assert.match(text,/INVALID_EVIDENCE/);assert.match(text,/SBOM_FAILURE/);assert.match(text,/0.76.0/);assert.match(text,/sha256:a{64}/);
+  assert.doesNotMatch(text,/sensitive-fixture/);
+  assert.match(securitySummary({},null,{runtimeScan:'failure'}),/runtime: SCANNER_FAILURE/);
+  assert.match(securitySummary({},null,{}),/MISSING_EVIDENCE/);
+  const infrastructure=securitySummary({},null,{base:'failure',runtimeHealth:'failure'});
+  assert.match(infrastructure,/BASE_IMAGE_IDENTITY_FAILURE/);assert.match(infrastructure,/RUNTIME_HARDENING_OR_HEALTH_FAILURE/);
+});
 
 test('reviewed builder HIGH occurrences remain visible with original severities and approval explanations',()=>{
   assert.deepEqual(exceptionPolicy.exceptions.map(e=>e.cve).sort(),['CVE-2026-109383','CVE-2026-109869','CVE-2026-87018']);
@@ -235,6 +289,30 @@ test('actual CI command requires both image roles and propagates coverage, sever
     assert.doesNotMatch(blocked.stdout+blocked.stderr,/never-log-fixture/);
     assert.doesNotMatch(await readFile(paths[1],'utf8'),/never-log-fixture/);
     assert.notEqual(spawnSync(process.execPath,[command,'trivy',...paths.slice(0,2)],{encoding:'utf8'}).status,0);
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test('collection preserves independent role evidence while the final gate remains fail closed',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'zevyrn-security-stages-'));
+  const command=fileURLToPath(new URL('../scripts/ci-security.mjs',import.meta.url));
+  const invoke=args=>spawnSync(process.execPath,[command,...args],{encoding:'utf8'});
+  const paths=['runtime-raw.json','runtime-scan.json','builder-raw.json','builder-scan.json'].map(n=>join(root,n));
+  try {
+    await writeFile(paths[0],JSON.stringify({error:'sensitive-stage-fixture'}));
+    await writeFile(paths[2],JSON.stringify(builder()));
+    const invalid=invoke(['report','runtime',...paths.slice(0,2)]);
+    assert.notEqual(invalid.status,0);assert.doesNotMatch(invalid.stdout+invalid.stderr,/sensitive-stage-fixture/);
+    assert.deepEqual(JSON.parse(await readFile(paths[1],'utf8')),{classification:'INVALID_EVIDENCE'});
+    assert.equal(invoke(['report','builder',...paths.slice(2)]).status,0);
+    assert.notEqual(invoke(['trivy',...paths]).status,0);
+    assert.equal(JSON.parse(await readFile(paths[3],'utf8')).blocked,false);
+    const blocked=runtime();blocked.Results[0].Vulnerabilities=[{VulnerabilityID:'CVE-2099-99999',Severity:'HIGH',PkgName:'fixture',InstalledVersion:'1'}];
+    await writeFile(paths[0],JSON.stringify(blocked));
+    assert.equal(invoke(['report','runtime',...paths.slice(0,2)]).status,0,'collection is not acceptance');
+    assert.notEqual(invoke(['trivy',...paths]).status,0);
+    const summary=invoke(['summary',root,JSON.stringify({runtimeScan:'failure',builderScan:'success',security:'failure'})]);
+    assert.equal(summary.status,0);assert.match(summary.stdout,/VULNERABILITY_POLICY/);
+    assert.match(await readFile(join(root,'summary.md'),'utf8'),/CVE-2099-99999/);
   } finally {await rm(root,{recursive:true,force:true});}
 });
 test('npm audit gate includes development findings and preserves lower advisory counts',()=>{

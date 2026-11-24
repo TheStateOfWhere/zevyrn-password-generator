@@ -7,6 +7,8 @@ import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {gunzipSync} from 'node:zlib';
 import {pathToFileURL} from 'node:url';
+import {validateBuilderAcceptance} from './ci-security.mjs';
+const builderExceptions=JSON.parse(readFileSync(new URL('./ci-builder-exceptions.json',import.meta.url)));
 export const repository='TheStateOfWhere/zevyrn-password-generator';
 export const repositoryId=1421770645;
 export const version='1.2.2';
@@ -76,7 +78,7 @@ export function validateConfig(c,sourceCommit) {
   same(p.Entrypoint,['nginx']);same(p.Cmd,['-g','daemon off;']);same(p.ExposedPorts,{'8080/tcp':{}});
   same(p.Healthcheck.Test,['CMD-SHELL','wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1']);
   assert(p.Healthcheck.Interval===30000000000&&p.Healthcheck.Timeout===3000000000&&p.Healthcheck.StartPeriod===10000000000&&p.Healthcheck.Retries===3);
-  same(p.Env,['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','NGINX_VERSION=1.30.6','PKG_RELEASE=1','DYNPKG_RELEASE=1','NJS_VERSION=1.0.2','NJS_RELEASE=1','ACME_VERSION=0.4.1']);
+  same(p.Env,['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','NGINX_VERSION=1.30.8','PKG_RELEASE=1','DYNPKG_RELEASE=1','NJS_VERSION=1.0.2','NJS_RELEASE=1','ACME_VERSION=0.4.2']);
   assert(p.Labels['org.opencontainers.image.version']===version&&p.Labels['org.opencontainers.image.revision']===sourceCommit&&p.Labels['org.opencontainers.image.source']===sourceURL);
   assert(c.rootfs.type==='layers'&&c.rootfs.diff_ids.length>0);c.rootfs.diff_ids.forEach(sha);
 }
@@ -262,7 +264,7 @@ export function validateEvidence(identity,evidence,context) {
   for(const report of [runtime,builder])assert(report.blocked===false&&report.blockingVulnerabilities===0&&report.secrets===0);
   const fixed=['CVE-2026-113351','CVE-2026-115506','CVE-2026-117610','CVE-2026-118370','CVE-2026-125350','CVE-2026-87636','CVE-2026-9947','CVE-2026-107891'];
   assert(!runtime.results?.some(r=>r.vulnerabilities?.some(v=>fixed.includes(v.id))),'Previously blocked CVE remains');
-  assert(builder.approvedHighCount===3&&builder.unapprovedHighCount===0);
+  validateBuilderAcceptance(builder,builderExceptions);
   assert(builderIdentity.sourceCommit===identity.sourceCommit&&builderIdentity.sourceTree===identity.sourceTree&&hex.test(builderIdentity.archiveSHA256));sha(builderIdentity.imageID);
   assert(npm.blocked===false&&npm.counts.high===0&&npm.counts.critical===0);
   assert(scanner.Version==='0.76.0'&&scanner.VulnerabilityDB?.Version===2);

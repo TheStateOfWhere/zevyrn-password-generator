@@ -61,7 +61,20 @@ jobs:
           set -e
           test "$audit_status" -le 1
           node scripts/ci-security.mjs npm "$RUNNER_TEMP/npm-audit.json" artifacts/security/npm-audit.json
+      - name: Verify reviewed immutable Nginx base and Linux platform
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/security
+          base="$(awk '$1 == "FROM" && $NF == "runtime-rootfs" { print $2 }' Dockerfile)"
+          digest="${base##*@}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' > artifacts/security/nginx-base-manifest.json
+          jq --exit-status --arg digest "$digest" '.digest == $digest and ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1)' artifacts/security/nginx-base-manifest.json
+          jq --exit-status '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")][0].digest == "sha256:0616b208d25086f7a903e993626c56193787307fec4423bf7d3ce77194d2b1c5"' artifacts/security/nginx-base-manifest.json
       - name: Build separate builder and runtime images
+        id: images
         run: |
           docker build --platform linux/amd64 --target build -t zevyrn-ci-builder .
           docker build --platform linux/amd64 -t zevyrn-ci-runtime .
@@ -75,6 +88,7 @@ jobs:
           docker save -o "$RUNNER_TEMP/runtime.tar" zevyrn-ci-runtime
           docker save -o "$RUNNER_TEMP/builder.tar" zevyrn-ci-builder
       - name: Verified scanner and fresh vulnerability database
+        id: scanner
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/trivy-bin"
@@ -85,26 +99,69 @@ jobs:
           "$RUNNER_TEMP/trivy-bin/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --download-db-only
           "$RUNNER_TEMP/trivy-bin/trivy" --cache-dir "$RUNNER_TEMP/trivy-cache" version --format json > artifacts/security/scanner-version.json
           date --utc --iso-8601=seconds > artifacts/security/scan-start.txt
-      - name: Scan runtime and builder, generate runtime SBOM
+      - name: Scan runtime vulnerabilities and secrets
+        id: runtime_scan
+        if: ${{ !cancelled() && steps.images.outcome == 'success' && steps.scanner.outcome == 'success' }}
         env:
           TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
           trivy image --input "$RUNNER_TEMP/runtime.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/runtime-raw.json"
+          node scripts/ci-security.mjs report runtime "$RUNNER_TEMP/runtime-raw.json" artifacts/security/runtime-scan.json
+      - name: Scan builder vulnerabilities and secrets
+        id: builder_scan
+        if: ${{ !cancelled() && steps.images.outcome == 'success' && steps.scanner.outcome == 'success' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
           trivy image --input "$RUNNER_TEMP/builder.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/builder-raw.json"
-          trivy image --input "$RUNNER_TEMP/runtime.tar" --format cyclonedx --output artifacts/security/runtime-sbom.cdx.json
+          node scripts/ci-security.mjs report builder "$RUNNER_TEMP/builder-raw.json" artifacts/security/builder-scan.json
+      - name: Generate and validate runtime SBOM
+        id: sbom
+        if: ${{ !cancelled() && steps.runtime_scan.outcome == 'success' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          trivy image --input "$RUNNER_TEMP/runtime.tar" --format cyclonedx --output "$RUNNER_TEMP/runtime-sbom.cdx.json"
+          node scripts/ci-security.mjs sbom "$RUNNER_TEMP/runtime-sbom.cdx.json" "$RUNNER_TEMP/runtime-raw.json" artifacts/security/runtime-sbom.cdx.json
+      - name: Final security acceptance
+        id: security
+        if: ${{ !cancelled() && steps.images.outcome == 'success' }}
+        run: |
+          test '${{ steps.runtime_scan.outcome }}' = success
+          test '${{ steps.builder_scan.outcome }}' = success
+          test '${{ steps.sbom.outcome }}' = success
           node scripts/ci-security.mjs trivy "$RUNNER_TEMP/runtime-raw.json" artifacts/security/runtime-scan.json "$RUNNER_TEMP/builder-raw.json" artifacts/security/builder-scan.json
       - name: Isolated runtime health and permissions
+        id: hardening
         shell: bash
         run: |
+          set -euo pipefail
           container="zevyrn-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$container" --network none --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 128m --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 zevyrn-ci-runtime
-          for attempt in $(seq 1 30); do
-            if docker exec "$container" wget -qO /dev/null http://127.0.0.1:8080/healthz; then break; fi
+          docker inspect "$container" > "$RUNNER_TEMP/runtime-container.json"
+          node scripts/release-integrity.mjs container "$RUNNER_TEMP/runtime-container.json"
+          for attempt in $(seq 1 60); do
+            if test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy; then break; fi
             sleep 1
           done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy
           test "$(docker exec "$container" wget -qO- http://127.0.0.1:8080/healthz)" = ok
-          docker exec "$container" sh -ec 'test "$(id -u)" = 10001; nginx -v; apk info -v libexpat zlib; ! command -v node; ! command -v npm; ! test -d /app/node_modules'
+          docker exec "$container" nginx -t
+          docker exec "$container" sh -ec 'test "$(id -u)" = 10001; test "$(stat -c %u:%g /usr/share/nginx/html/index.html)" = 10001:10001; test -r /usr/share/nginx/html/index.html; test -r /etc/nginx/nginx.conf; test -x /usr/share/nginx/html; ! test -w /etc/nginx/nginx.conf; ! test -w /usr/share/nginx/html; touch /tmp/zevyrn-write-probe; nginx -v; ! command -v node; ! command -v npm; ! test -d /app/node_modules'
+          docker exec "$container" apk info -v nginx libxml2 libxpm zlib libexpat > artifacts/security/runtime-packages.txt
+          for spec in nginx=1.30.8-r1 libxml2=2.13.9-r3 libxpm=3.5.20-r0 zlib=1.4-r0 libexpat=2.10.0-r0; do
+            installed="$(jq -r --arg name "${spec%%=*}" '[.components[] | select(.name == $name) | .version] | if length == 1 then .[0] else error("Missing or duplicate runtime package") end' artifacts/security/runtime-sbom.cdx.json)"
+            test -n "$installed"
+            comparison="$(docker exec "$container" apk version -t "$installed" "${spec#*=}")"
+            [[ "$comparison" == '=' || "$comparison" == '>' ]]
+          done
+      - name: Actionable sanitized security summary
+        if: always()
+        env:
+          SECURITY_STAGES: >-
+            {"base":"${{ steps.base.outcome }}","scanner":"${{ steps.scanner.outcome }}","runtimeScan":"${{ steps.runtime_scan.outcome }}","builderScan":"${{ steps.builder_scan.outcome }}","sbom":"${{ steps.sbom.outcome }}","security":"${{ steps.security.outcome }}","runtimeHealth":"${{ steps.hardening.outcome }}"}
+        run: node scripts/ci-security.mjs summary artifacts/security "$SECURITY_STAGES"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
