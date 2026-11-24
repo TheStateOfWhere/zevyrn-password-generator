@@ -45,12 +45,24 @@ test('quality retains exact image/browser coverage with read-only fork-safe arti
   assert(browserScript.includes('packet/assets'));assert(browserScript.includes('release-integrity.mjs browser packet'));assert(browserScript.includes('quality-browser-result'));
 });
 
-test('transition keeps automatic PR qualification and exact manual release entry points operational', {skip:!existsSync('.github/workflows/qualify-maintenance-image.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+test('qualification is manual-only and preserves exact release source, evidence and publication contracts', {skip:!existsSync('.github/workflows/qualify-maintenance-image.yml')&&'Workflow contracts run on the source checkout'},async()=>{
   const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
   const qualifier=yaml.parse(await read('.github/workflows/qualify-maintenance-image.yml'));
-  assert.deepEqual(qualifier.on.pull_request,{branches:['main'],types:['opened','synchronize','reopened']});
+  assert.deepEqual(Object.keys(qualifier.on),['workflow_dispatch']);
   assert.deepEqual(qualifier.on.workflow_dispatch.inputs.source_commit,{description:'Exact approved main commit containing v1.2.3 metadata',required:true,type:'string'});
   assert.deepEqual(Object.keys(qualifier.jobs).sort(),['browser','runtime','seal']);
+  assert.deepEqual(qualifier.permissions,{contents:'read',actions:'read'});
+  assert.equal(qualifier.concurrency['cancel-in-progress'],false);
+  assert.equal(qualifier.jobs.browser.needs,'runtime');assert.deepEqual(qualifier.jobs.seal.needs,['runtime','browser']);
+  const runtime=qualifier.jobs.runtime.steps;
+  const init=runtime.find(step=>step.id==='init');assert(init.run.includes('release-integrity.mjs qualification-context'));
+  assert(init.run.includes('test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE"'));
+  const prerequisite=runtime.find(step=>step.name==='Require matching successful source CI without a parallel-run race');
+  assert(prerequisite.run.includes('--workflow quality-security.yml --commit "$QUALIFICATION_SOURCE" --event "$QUALITY_EVENT" --branch "$QUALITY_BRANCH"'));
+  assert(prerequisite.run.includes('release-integrity.mjs quality'));
+  assert(qualifier.jobs.seal.steps.some(step=>step.run==='node scripts/release-integrity.mjs seal packet'));
+  const quality=yaml.parse(await read('.github/workflows/quality-security.yml'));
+  assert(Object.hasOwn(quality.on,'pull_request'));
   const publisher=yaml.parse(await read('.github/workflows/publish-maintenance-image.yml'));
   assert.deepEqual(Object.keys(publisher.on),['workflow_dispatch']);
   assert.equal(publisher.jobs.promote.environment,'zevyrn-ghcr-publication');

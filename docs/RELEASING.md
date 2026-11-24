@@ -1,6 +1,6 @@
 # Validation and release process
 
-## Transitional PR validation
+## Consolidated PR validation
 
 `quality-security.yml` validates PR heads with read-only permissions. Its Linux
 job runs application tests, type checks, actual Compose rendering, the dependency
@@ -23,10 +23,10 @@ Quality records and browser results explicitly have `purpose: quality` and
 `promotionEligible: false`, including on main. They are not release qualification
 artifacts and cannot be supplied to the existing publication workflow.
 
-During migration, automatic PR qualification also continues in
-`qualify-maintenance-image.yml`. This temporary overlap is intentional. Do not
-remove its PR trigger until hosted coverage has been independently accepted and
-trigger removal separately authorized.
+`quality-security.yml` is the sole automatic PR validation workflow.
+`qualify-maintenance-image.yml` no longer runs on PR events; it remains available
+for explicitly dispatched release-purpose qualification on main. Quality and
+PR evidence remain non-promotable.
 
 Security failures retain sanitized reports and stage summaries. Raw secret
 matches, snippets and failed-image archives are not uploaded as diagnostics.
@@ -61,12 +61,19 @@ Public source and images remain supported. Running deployments are supported
 only on private/internal networks or localhost. Use the documented Docker and
 Compose installation paths; release validation does not authorize deployment.
 
-## Hosted migration acceptance
+## Hosted validation and accepted coverage
 
 Local integrity, workflow, Bash and configuration tests do not substitute for
-Linux Docker execution or the Windows artifact/browser transfer. Before trigger
-retirement, verify both workflows on a candidate PR: retained OCI identity,
-fresh builder/runtime and configuration-secret scans, SBOM, all patched-package
-and hardening checks, authenticated artifact transport, and all eight suites.
-Confirm failure summaries and sanitized evidence on controlled negative cases.
-No release qualification/publication rerun is needed merely to test this PR path.
+Linux Docker execution or the Windows artifact/browser transfer. Milestone 1B
+quality run [45486924463](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45486924463)
+and PR qualification run [45486924580](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45486924580)
+passed for commit `5781788ae71813dfea8a86a4b7abf7f7a590b6d0`. Their downloaded
+evidence had identical runtime asset and SBOM package inventories. Hosted
+coverage equivalence was accepted before removing the redundant PR trigger.
+
+For subsequent PR revisions, require consolidated quality to pass its retained
+OCI, scans, SBOM, package floors, hardening, authenticated artifact/ZIP handling
+and all eight Windows suites. Failure/cancellation retention is supported by
+regression tests and workflow conditions; the successful comparison runs were
+not deliberately failed or cancelled. Do not dispatch release qualification or
+publication merely to test automatic PR validation.
