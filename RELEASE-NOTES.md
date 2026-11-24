@@ -1,3 +1,57 @@
+# Zevyrn 1.2.3 — security maintenance — in preparation, 2026-11-24
+
+- Updates the official Nginx stable Alpine base to 1.30.8 at immutable index
+  `sha256:6437a63b5c529f0e06162b3f593c0154cff6fa2ea0f94fd7c27928cb399e022d`.
+  The validated candidate contains Nginx 1.30.8-r1, libxml2 2.13.9-r3,
+  libxpm 3.5.20-r0, zlib 1.4-r0 and libexpat 2.10.0-r0, with patched
+  libcrypto3/libssl3 3.5.9-r1. Existing package security floors are retained,
+  including the explicit libxml2 floor added by the correction.
+- Remediates the previously reported runtime Nginx findings, including
+  CRITICAL CVE-2026-113425, CVE-2026-121810, CVE-2026-123007 and CVE-2026-123633,
+  and HIGH CVE-2026-118899 and CVE-2026-123634; also remediates HIGH
+  CVE-2026-86144 in libxml2 and the reported lower-severity runtime findings.
+- Separates runtime scanning, builder scanning, SBOM generation and final
+  acceptance, with actionable failure summaries identifying scope, image,
+  findings, fixed versions, dispositions and scanner/database information.
+- Retains available sanitized security evidence on qualification/publication
+  validation failures. Secret matches and sensitive snippets remain excluded;
+  published SBOM inventories retain image binding without arbitrary image labels.
+- Corrects builder-disposition validation so remediated findings need not remain
+  present. Zero through three remaining exact authorized Undici occurrences can
+  pass; unapproved HIGH, CRITICAL and secret findings continue to block.
+- Coordinates application, container, Compose and release-guard metadata at
+  1.2.3 while retaining the compiler artifact verification and refreshed exact
+  project/catalog hash anchors. Dependency versions and compiler payloads are unchanged.
+
+No intended changes to application functionality, password generation, dictionary,
+UI behavior or deployment requirements. The visible version changes to v1.2.3.
+Nonroot/read-only hardening, private/internal-or-localhost support, Linux/amd64,
+existing Compose compatibility, security thresholds, authorized builder-only
+dispositions, freshness requirements and protected publication approval are retained.
+
+## Engineering acceptance and publication status
+
+The Phase 1 candidate `6b450f0f3663706302529f9a19025061677782d9` passed
+[quality/security run 45342687883](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45342687883)
+and [PR qualification run 45342687863](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45342687863)
+on their first attempts on 2026-11-24. Fresh Trivy 0.76.0 scans reported zero
+runtime vulnerabilities of any severity and zero detected secrets. The builder
+retained three authorized HIGH findings, twelve MEDIUM and four LOW findings,
+with zero unapproved blocking findings and zero detected secrets. Builds, SBOM,
+237 Linux host tests, eight browser suites and runtime hardening checks passed.
+
+For comparison, the same day's fresh scan of the exact published v1.2.2 digest
+reported four CRITICAL, three HIGH, ten MEDIUM and four LOW runtime findings.
+These are dated findings, not a guarantee against future disclosures.
+
+**v1.2.3 is not yet published.** The evidence above applies to the earlier
+candidate identity, not the newly versioned source. PR-only artifacts remain
+non-promotable. A fresh qualification of the final approved main commit and
+protected publication of that same retained artifact are still required.
+Planned image: `ghcr.io/thestateofwhere/zevyrn:1.2.3`; final release source,
+published OCI digest and publication workflow record are pending. The Nginx base
+digest above is not a Zevyrn release digest. Existing tags/images remain immutable.
+
 # Zevyrn 1.2.2 — security maintenance — 2026-11-17
 
 - Incorporates the runtime package maintenance validated at

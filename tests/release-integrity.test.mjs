@@ -83,7 +83,7 @@ test('retained assets and manifest remain bound before browser qualification and
   writeFileSync(path,JSON.stringify(runtime.files));writeFileSync(join(f.runtime,'index.html'),'application fixture');mkdirSync(join(f.runtime,'unexpected-empty'));await assert.rejects(verifyRetainedAssets(f.root,identity));
 });
 const mt='application/vnd.oci.image.manifest.v1+json',it='application/vnd.oci.image.index.v1+json',ct='application/vnd.oci.image.config.v1+json';
-function config(){return {os:'linux',architecture:'amd64',rootfs:{type:'layers',diff_ids:[sha]},config:{User:'10001:10001',WorkingDir:'/',StopSignal:'SIGQUIT',Entrypoint:['nginx'],Cmd:['-g','daemon off;'],ExposedPorts:{'8080/tcp':{}},Healthcheck:{Test:['CMD-SHELL','wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1'],Interval:30000000000,Timeout:3000000000,StartPeriod:10000000000,Retries:3},Env:['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','NGINX_VERSION=1.30.6','PKG_RELEASE=1','DYNPKG_RELEASE=1','NJS_VERSION=1.0.2','NJS_RELEASE=1','ACME_VERSION=0.4.1'],Labels:{'org.opencontainers.image.version':'1.2.2','org.opencontainers.image.revision':source,'org.opencontainers.image.source':'https://github.com/'+repository}}};}
+function config(){return {os:'linux',architecture:'amd64',rootfs:{type:'layers',diff_ids:[sha]},config:{User:'10001:10001',WorkingDir:'/',StopSignal:'SIGQUIT',Entrypoint:['nginx'],Cmd:['-g','daemon off;'],ExposedPorts:{'8080/tcp':{}},Healthcheck:{Test:['CMD-SHELL','wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1'],Interval:30000000000,Timeout:3000000000,StartPeriod:10000000000,Retries:3},Env:['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','NGINX_VERSION=1.30.8','PKG_RELEASE=1','DYNPKG_RELEASE=1','NJS_VERSION=1.0.2','NJS_RELEASE=1','ACME_VERSION=0.4.2'],Labels:{'org.opencontainers.image.version':'1.2.3','org.opencontainers.image.revision':source,'org.opencontainers.image.source':'https://github.com/'+repository}}};}
 function graph(change=()=>{},attest=true){
   const members=new Map(),store=(value,mediaType)=>{const bytes=Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value));const digest='sha256:'+hash(bytes);members.set('blobs/sha256/'+digest.slice(7),bytes);return {mediaType,digest,size:bytes.length};};
   const c=config(),s={_type:'https://in-toto.io/Statement/v1',predicateType:'https://slsa.dev/provenance/v1',subject:[],predicate:{}};
@@ -99,9 +99,9 @@ function graph(change=()=>{},attest=true){
   const names=[...members.keys()];if(model.duplicateMember)names.push('index.json');
   return ()=>inspectGraph(name=>{assert(members.has(name));return members.get(name);},names,source);
 }
-test('OCI graph accepts only one runtime and recognized subject-bound provenance, including no-attestation case',()=>{assert.equal(graph()().version,'1.2.2');assert.equal(graph(()=>{},false)().version,'1.2.2');});
+test('OCI graph accepts only one runtime and recognized subject-bound provenance, including no-attestation case',()=>{assert.equal(graph()().version,'1.2.3');assert.equal(graph(()=>{},false)().version,'1.2.3');});
 test('OCI graph separately accepts documented legacy image and OCI artifact attestation configurations',()=>{
-  assert.equal(graph()().version,'1.2.2');assert.equal(graph(m=>m.artifact=true)().version,'1.2.2');
+  assert.equal(graph()().version,'1.2.3');assert.equal(graph(m=>m.artifact=true)().version,'1.2.3');
 });
 const rejectsCode=(operation,code)=>assert.throws(operation,error=>diagnosticCode(error)===code);
 test('attestation config rejects wrong media types, hybrid formats, bad content and artifact types',()=>{
@@ -161,15 +161,24 @@ test('CLI diagnostic evidence contains only archive hash, validated index digest
 test('OCI graph rejects additional platforms, duplicate runtimes, orphan blobs, corrupt blobs and duplicate members',()=>{for(const change of [m=>m.extra={os:'linux',architecture:'arm64'},m=>m.extra={os:'windows',architecture:'amd64'},m=>m.duplicate=true,m=>m.orphan=true,m=>m.corrupt=true,m=>m.duplicateMember=true])assert.throws(graph(change));});
 test('OCI graph rejects unknown provenance and incorrect or multiple attestation subjects',()=>{for(const change of [m=>m.statement.predicateType='https://unrecognized',m=>m.statement._type='unknown',m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}}],m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}},{digest:{sha256:'e'.repeat(64)}}]])assert.throws(graph(change));});
 test('archive config rejects historical version, false source labels and changed runtime protections',()=>{for(const change of [c=>c.config.Labels['org.opencontainers.image.version']='1.2.1',c=>c.config.Labels['org.opencontainers.image.revision']='f'.repeat(40),c=>c.config.User='0',c=>c.config.Entrypoint=['sh'],c=>c.config.Env.push('EXTRA=1'),c=>c.config.ExposedPorts['80/tcp']={},c=>c.config.Healthcheck.Retries=1]){const c=config();change(c);assert.throws(()=>validateConfig(c,source));}});
-function runFixture(){const start=new Date(now-600000).toISOString();return {run:{id:42,run_attempt:2,repository:{id:repositoryId,full_name:repository},head_repository:{id:repositoryId},path:'.github/workflows/qualify-maintenance-image.yml',event:'workflow_dispatch',head_branch:'main',head_sha:source,status:'completed',conclusion:'success',created_at:start,run_started_at:start},jobs:{total_count:3,jobs:['runtime','browser','seal'].map((name,id)=>({id,name,run_id:42,run_attempt:2,status:'completed',conclusion:'success'}))},artifacts:{total_count:1,artifacts:[{id:9,name:'zevyrn-v1.2.2-qualified-42-2',size_in_bytes:100,digest:sha,expired:false,created_at:new Date(now).toISOString(),workflow_run:{id:42,head_sha:source,head_branch:'main',repository_id:repositoryId,head_repository_id:repositoryId}}]}};}
+function runFixture(){const start=new Date(now-600000).toISOString();return {run:{id:42,run_attempt:2,repository:{id:repositoryId,full_name:repository},head_repository:{id:repositoryId},path:'.github/workflows/qualify-maintenance-image.yml',event:'workflow_dispatch',head_branch:'main',head_sha:source,status:'completed',conclusion:'success',created_at:start,run_started_at:start},jobs:{total_count:3,jobs:['runtime','browser','seal'].map((name,id)=>({id,name,run_id:42,run_attempt:2,status:'completed',conclusion:'success'}))},artifacts:{total_count:1,artifacts:[{id:9,name:'zevyrn-v1.2.3-qualified-42-2',size_in_bytes:100,digest:sha,expired:false,created_at:new Date(now).toISOString(),workflow_run:{id:42,head_sha:source,head_branch:'main',repository_id:repositoryId,head_repository_id:repositoryId}}]}};}
 const assess=f=>validateRun(f.run,f.jobs,f.artifacts,source,now);
 test('qualification selects the immutable artifact from the exact successful source/run/attempt',()=>{assert.equal(assess(runFixture()).artifactId,9);});
 test('qualification rejects wrong repository, workflow, source, branch, event, status, conclusion and stale runs',()=>{for(const change of [f=>f.run.repository.id++,f=>f.run.head_repository.id++,f=>f.run.path='.github/workflows/other.yml',f=>f.run.head_sha='d'.repeat(40),f=>f.run.head_branch='other',f=>f.run.event='pull_request',f=>f.run.status='in_progress',f=>f.run.conclusion='failure',f=>f.run.created_at=new Date(now-86400001).toISOString()]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
 test('qualification rejects every unsuccessful, skipped, missing, duplicate or previous-attempt required job',()=>{for(let i=0;i<3;i++)for(const change of [j=>j.conclusion='failure',j=>j.conclusion='skipped',j=>j.status='in_progress',j=>j.run_attempt=1,j=>j.run_id=41]){const f=runFixture();change(f.jobs.jobs[i]);assert.throws(()=>assess(f));}for(const change of [f=>f.jobs.jobs.pop(),f=>f.jobs.jobs[2]=clone(f.jobs.jobs[0])]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
-test('qualification rejects expired, duplicate, foreign, wrong-attempt and unauthenticated artifacts',()=>{for(const change of [f=>f.artifacts.artifacts[0].expired=true,f=>f.artifacts.artifacts[0].name='zevyrn-v1.2.2-qualified-42-1',f=>f.artifacts.artifacts[0].digest='invalid',f=>f.artifacts.artifacts[0].workflow_run.head_sha='d'.repeat(40),f=>f.artifacts.artifacts[0].workflow_run.repository_id++,f=>f.artifacts.artifacts[0].created_at=new Date(now-86400000).toISOString(),f=>{f.artifacts.artifacts.push(clone(f.artifacts.artifacts[0]));f.artifacts.total_count++;}]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
-function evidenceFixture(){const identity={version:'1.2.2',sourceCommit:source,sourceTree:tree,archiveSHA256:'c'.repeat(64),indexDigest:sha,assetsSHA256:'d'.repeat(64),configDigest:sha,diffIDs:[sha]};const context={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main',runId:42,runAttempt:2,sourceCommit:source,sourceTree:tree,startedAt:now-600000};const evidence={browser:{...context,archiveSHA256:identity.archiveSHA256,indexDigest:sha,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))},health:{archiveSHA256:identity.archiveSHA256,indexDigest:sha,passed:true,checks:['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']},runtime:{blocked:false,blockingVulnerabilities:0,secrets:0,results:[]},builder:{blocked:false,blockingVulnerabilities:0,secrets:0,approvedHighCount:3,unapprovedHighCount:0},builderIdentity:{sourceCommit:source,sourceTree:tree,imageID:sha,archiveSHA256:"f".repeat(64)},npm:{blocked:false,counts:{high:0,critical:0}},scanner:{Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(now-600000).toISOString(),DownloadedAt:new Date(now).toISOString(),NextUpdate:new Date(now+86400000).toISOString()}},sbom:{bomFormat:'CycloneDX',metadata:{component:{properties:[{name:'aquasecurity:trivy:ImageID',value:sha},{name:'aquasecurity:trivy:DiffID',value:sha}]}},components:[{name:'nginx'}]},scanIdentity:{...identity,scanArchiveSHA256:'e'.repeat(64),runtimeImageID:sha,sbomImageID:sha,scanners:['vuln','secret'],imageConfigScanners:['secret']}};return {identity,context,evidence};}
+test('qualification rejects expired, duplicate, foreign, wrong-attempt and unauthenticated artifacts',()=>{for(const change of [f=>f.artifacts.artifacts[0].expired=true,f=>f.artifacts.artifacts[0].name='zevyrn-v1.2.3-qualified-42-1',f=>f.artifacts.artifacts[0].digest='invalid',f=>f.artifacts.artifacts[0].workflow_run.head_sha='d'.repeat(40),f=>f.artifacts.artifacts[0].workflow_run.repository_id++,f=>f.artifacts.artifacts[0].created_at=new Date(now-86400000).toISOString(),f=>{f.artifacts.artifacts.push(clone(f.artifacts.artifacts[0]));f.artifacts.total_count++;}]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
+function evidenceFixture(){const identity={version:'1.2.3',sourceCommit:source,sourceTree:tree,archiveSHA256:'c'.repeat(64),indexDigest:sha,assetsSHA256:'d'.repeat(64),configDigest:sha,diffIDs:[sha]};const context={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main',runId:42,runAttempt:2,sourceCommit:source,sourceTree:tree,startedAt:now-600000};const evidence={browser:{...context,archiveSHA256:identity.archiveSHA256,indexDigest:sha,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))},health:{archiveSHA256:identity.archiveSHA256,indexDigest:sha,passed:true,checks:['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']},runtime:{blocked:false,blockingVulnerabilities:0,secrets:0,results:[]},builder:{blocked:false,blockingVulnerabilities:0,secrets:0,approvedHighCount:0,rawBlockingVulnerabilities:0,unapprovedHighCount:0,results:[{type:'alpine',vulnerabilities:[],secrets:[]}]},builderIdentity:{sourceCommit:source,sourceTree:tree,imageID:sha,archiveSHA256:"f".repeat(64)},npm:{blocked:false,counts:{high:0,critical:0}},scanner:{Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(now-600000).toISOString(),DownloadedAt:new Date(now).toISOString(),NextUpdate:new Date(now+86400000).toISOString()}},sbom:{bomFormat:'CycloneDX',metadata:{component:{properties:[{name:'aquasecurity:trivy:ImageID',value:sha},{name:'aquasecurity:trivy:DiffID',value:sha}]}},components:[{name:'nginx'}]},scanIdentity:{...identity,scanArchiveSHA256:'e'.repeat(64),runtimeImageID:sha,sbomImageID:sha,scanners:['vuln','secret'],imageConfigScanners:['secret']}};return {identity,context,evidence};}
 const evidenceCheck=f=>validateEvidence(f.identity,f.evidence,f.context);
 test('qualification evidence accepts exact archive/source/assets with all required results',()=>{evidenceCheck(evidenceFixture());});
+test('release acceptance allows zero through three exact authorized remaining HIGH findings',()=>{
+  const policy=JSON.parse(readFileSync(new URL('../scripts/ci-builder-exceptions.json',import.meta.url)));
+  for(let count=0;count<=3;count++) {
+    const f=evidenceFixture(),vulnerabilities=policy.exceptions.slice(0,count).map(e=>({id:e.cve,package:e.package,installed:e.version,path:e.path,severity:'HIGH',exception:{rationale:e.rationale,reviewReference:e.reviewReference}}));
+    f.evidence.builder={...f.evidence.builder,approvedHighCount:count,rawBlockingVulnerabilities:count,results:[{type:'node-pkg',vulnerabilities,secrets:[]}]};
+    evidenceCheck(f);
+    if(count) {f.evidence.builder.results[0].vulnerabilities[0].path='other/package.json';assert.throws(()=>evidenceCheck(f));}
+  }
+});
 test('qualification evidence rejects mismatched archives, source, assets, failed browser/runtime, missing SBOM and unsafe scans',()=>{for(const change of [f=>f.evidence.browser.archiveSHA256='e'.repeat(64),f=>f.evidence.browser.sourceTree='e'.repeat(40),f=>f.evidence.browser.assetsSHA256='e'.repeat(64),f=>f.evidence.browser.suites[0].conclusion='failure',f=>f.evidence.browser.suites.pop(),f=>f.evidence.health.passed=false,f=>f.evidence.health.checks.pop(),f=>f.evidence.runtime.blocked=true,f=>f.evidence.builder.secrets=1,f=>f.evidence.builder.unapprovedHighCount=1,f=>f.evidence.builderIdentity.sourceCommit=tree,f=>f.context.startedAt=null,f=>f.evidence.runtime.results=[{vulnerabilities:[{id:'CVE-2026-107891',severity:'MEDIUM'}]}],f=>delete f.evidence.sbom,f=>delete f.evidence.scanner.VulnerabilityDB,f=>f.evidence.scanner.Version='other',f=>f.evidence.scanner.VulnerabilityDB.DownloadedAt=new Date(now-86400000).toISOString()]){const f=evidenceFixture();change(f);assert.throws(()=>evidenceCheck(f));}});
 test('derived Docker image must preserve exact rootfs and execution configuration',()=>{const identity={sourceCommit:source,configDigest:sha,config:config(),diffIDs:[sha]},image={Id:sha,Os:'linux',Architecture:'amd64',Config:clone(identity.config.config),RootFS:{Layers:[sha]}};verifyLoaded(identity,image);for(const change of [i=>i.RootFS.Layers=[sha256Other()],i=>i.Config.Env.push('UNEXPECTED=1'),i=>i.Config.User='0']){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(identity,i));}});
 function sha256Other(){return 'sha256:'+'d'.repeat(64);}
@@ -184,7 +193,7 @@ test('Docker-save verification binds exact configuration/history and plain or gz
 });
 test('loaded image binding rejects tag-only selection, wrong ID, config digest, platform and diff IDs',()=>{
   const f=dockerFixture(),image={Id:f.identity.configDigest,Os:'linux',Architecture:'amd64',Config:clone(f.identity.config.config),RootFS:{Layers:f.identity.diffIDs}};
-  for(const change of [i=>i.Id='zevyrn-release-runtime:1.2.2',i=>i.Id=sha,i=>i.Architecture='arm64',i=>i.Os='windows',i=>i.RootFS.Layers=[sha],i=>i.Config.User='0',i=>i.Config.Labels['org.opencontainers.image.revision']=tree]){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(f.identity,i));}
+  for(const change of [i=>i.Id='zevyrn-release-runtime:1.2.3',i=>i.Id=sha,i=>i.Architecture='arm64',i=>i.Os='windows',i=>i.RootFS.Layers=[sha],i=>i.Config.User='0',i=>i.Config.Labels['org.opencontainers.image.revision']=tree]){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(f.identity,i));}
   assert.throws(()=>verifyLoaded({...f.identity,configDigest:sha},image));
 });
 test('Docker-save verification rejects changed config/history, layers, unsafe references and multiple images',()=>{
@@ -234,9 +243,46 @@ test('qualification and read-only publication validation scan verified derived a
     assert(script.includes('prepare-scan'));assert(script.includes('scan-runtime'));assert(script.includes('$RUNNER_TEMP/runtime-scan.tar'));assert(!/trivy" image --input .*archive\.oci\.tar/.test(script));
     assert(script.includes('v0.76.0'));assert(script.includes('e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7'));assert(script.includes('--download-db-only'));
     for(const step of job.steps)assert(!step['continue-on-error']);
-    if(file.startsWith('qualify')){assert(script.includes('sbom-runtime'));const collect=job.steps.findIndex(s=>s.name==='Collect sanitized failed-archive diagnostics'),hardening=job.steps.findIndex(s=>s.id==='hardening');assert(collect>hardening);assert(job.steps[collect].if.includes("steps.archive.outcome == 'success'"));const upload=job.steps.find(s=>s.with?.name?.startsWith('zevyrn-v1.2.2-failed-diagnostics-'));assert.equal(upload.with.path,'artifacts/release/diagnostics/*.json');assert.equal(upload.with['retention-days'],7);assert.deepEqual(doc.permissions,{contents:'read',actions:'read'});}
+    if(file.startsWith('qualify')){assert(script.includes('sbom-runtime'));const collect=job.steps.findIndex(s=>s.name==='Collect sanitized failed-archive diagnostics'),hardening=job.steps.findIndex(s=>s.id==='hardening');assert(collect>hardening);assert.equal(job.steps[collect].if,"failure()");const upload=job.steps.find(s=>s.with?.name?.startsWith('zevyrn-v1.2.3-failed-diagnostics-'));assert.match(upload.with.path,/artifacts\/release\/diagnostics\/\*\.json/);assert.match(upload.with.path,/summary\.md/);assert.equal(upload.with['retention-days'],7);assert.deepEqual(doc.permissions,{contents:'read',actions:'read'});}
     else{assert.deepEqual(job.permissions,{contents:'read',actions:'read'});assert.equal(doc.jobs.promote.environment,'zevyrn-ghcr-publication');}
   }
+});
+
+test('security stages collect independent sanitized evidence and require every acceptance prerequisite',{skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts execute on the source checkout'},()=>{
+  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
+  for(const [file,job] of [['quality-security','quality-image'],['qualify-maintenance-image','runtime']]) {
+    const steps=yaml.parse(readFileSync(`.github/workflows/${file}.yml`,'utf8')).jobs[job].steps;
+    for(const id of ['runtime_scan','builder_scan','sbom','security'])assert(steps.some(s=>s.id===id));
+    const builder=steps.find(s=>s.id==='builder_scan'),gate=steps.find(s=>s.id==='security'),sbom=steps.find(s=>s.id==='sbom');
+    assert.match(builder.if,/!cancelled\(\)/);assert.doesNotMatch(builder.if,/runtime_scan/);
+    for(const id of ['runtime_scan','builder_scan','sbom'])assert(gate.run.includes(`steps.${id}.outcome`));
+    assert.match(gate.run,/ci-security\.mjs trivy/);
+    assert.match(sbom.run,/ci-security\.mjs sbom "\$RUNNER_TEMP\/runtime-sbom\.cdx\.json"/);
+    const summary=steps.find(s=>s.name==='Actionable sanitized security summary');assert.equal(summary.if,'always()');
+    assert(steps.some(s=>s.if==='always()'&&s.uses?.startsWith('actions/upload-artifact@'))||file.startsWith('qualify'));
+    assert(steps.every(s=>!s['continue-on-error']));
+  }
+});
+test('candidate quality validation checks pinned base, patched packages and hardened execution without publication',{skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts execute on the source checkout'},()=>{
+  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
+  const quality=yaml.parse(readFileSync('.github/workflows/quality-security.yml','utf8'));
+  assert(Object.hasOwn(quality.on,'pull_request'));assert.deepEqual(quality.permissions,{contents:'read'});
+  const steps=quality.jobs['quality-image'].steps,base=steps.find(s=>s.id==='base'),health=steps.find(s=>s.id==='hardening');
+  assert.match(base.run,/imagetools inspect/);assert.match(base.run,/\.digest == \$digest/);
+  assert.match(base.run,/0616b208d25086f7a903e993626c56193787307fec4423bf7d3ce77194d2b1c5/);
+  assert.match(health.run,/release-integrity\.mjs container/);assert.match(health.run,/State.Health.Status/);
+  assert.match(health.run,/stat -c %u:%g/);assert.match(health.run,/! test -w \/usr\/share\/nginx\/html/);
+  assert.match(health.run,/touch \/tmp\/zevyrn-write-probe/);
+  for(const floor of ['nginx=1.30.8-r1','libxml2=2.13.9-r3','libxpm=3.5.20-r0','zlib=1.4-r0','libexpat=2.10.0-r0'])assert(health.run.includes(floor));
+  assert(steps.findIndex(s=>s.name==='Actionable sanitized security summary')>steps.indexOf(health));
+  for(const job of Object.values(quality.jobs)) {
+    assert(!job.environment&&!job.permissions);assert(!JSON.stringify(job).includes('secrets.'));
+    for(const step of job.steps)assert(!/docker (?:push|login)|--push|skopeo copy|gh (?:workflow run|release)|ssh\s/.test(step.run??''));
+  }
+  for(const publisher of ['publish-qualified-image','publish-maintenance-image'])assert.deepEqual(Object.keys(yaml.parse(readFileSync(`.github/workflows/${publisher}.yml`,'utf8')).on),['workflow_dispatch']);
+  const qualifier=yaml.parse(readFileSync('.github/workflows/qualify-maintenance-image.yml','utf8'));
+  assert.deepEqual(qualifier.permissions,{contents:'read',actions:'read'});
+  for(const job of Object.values(qualifier.jobs))assert(!job.environment&&!job.permissions);
 });
 test('container checks reject any loss of hardened execution settings',()=>{const c={Config:{User:'10001:10001'},State:{Running:true},HostConfig:{ReadonlyRootfs:true,Privileged:false,NetworkMode:'none',PidsLimit:128,Memory:134217728,CapDrop:['ALL'],CapAdd:null,SecurityOpt:['no-new-privileges'],Tmpfs:{'/tmp':'rw,noexec,nosuid,size=16m,mode=1777'}}};verifyContainer(c);for(const change of [x=>x.HostConfig.ReadonlyRootfs=false,x=>x.HostConfig.Privileged=true,x=>x.HostConfig.NetworkMode='default',x=>x.HostConfig.CapAdd=['SYS_ADMIN'],x=>x.HostConfig.SecurityOpt=[],x=>x.HostConfig.Tmpfs['/tmp']='rw',x=>x.Config.User='0']){const x=clone(c);change(x);assert.throws(()=>verifyContainer(x));}});
 test('documented Skopeo Repository/Tags response accepts an absent destination and existing historical tags',()=>{
@@ -248,14 +294,21 @@ test('Skopeo tag validation fails closed on wrong identity, missing fields, malf
     {Repository:'docker.io/thestateofwhere/zevyrn',Tags:[]},{Repository:'ghcr.io/other/zevyrn',Tags:[]},
     {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:null},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:[null]},
     {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['']},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['bad/tag']},
-    {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.1','1.2.1']},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.2']},
+    {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.1','1.2.1']},{Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.3']},
     {Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:[],unexpected:true}])assert.throws(()=>validateTags(response));
 });
 
-test('only the exact lightweight or peeled v1.2.2 release tag can authorize promotion',()=>{validateReleaseRef(source+'\trefs/tags/v1.2.2\n',source);validateReleaseRef(tree+'\trefs/tags/v1.2.2\n'+source+'\trefs/tags/v1.2.2^{}\n',source);for(const text of ['',source+'\trefs/tags/v1.2.1\n',tree+'\trefs/tags/v1.2.2\n',source+'\trefs/tags/v1.2.2\n'+source+'\trefs/tags/v1.2.2\n'])assert.throws(()=>validateReleaseRef(text,source));});
+test('only the exact lightweight or peeled v1.2.3 release tag can authorize promotion',()=>{validateReleaseRef(source+'\trefs/tags/v1.2.3\n',source);validateReleaseRef(tree+'\trefs/tags/v1.2.3\n'+source+'\trefs/tags/v1.2.3^{}\n',source);for(const text of ['',source+'\trefs/tags/v1.2.1\n',tree+'\trefs/tags/v1.2.3\n',source+'\trefs/tags/v1.2.3\n'+source+'\trefs/tags/v1.2.3\n'])assert.throws(()=>validateReleaseRef(text,source));});
+test('v1.2.3 guards reject previous-version tags, image metadata and qualification artifacts',()=>{
+  assert.throws(()=>validateReleaseRef(source+'\trefs/tags/v1.2.2\n',source));
+  const c=config();c.config.Labels['org.opencontainers.image.version']='1.2.2';assert.throws(()=>validateConfig(c,source));
+  const prior=runFixture();prior.artifacts.artifacts[0].name='zevyrn-v1.2.2-qualified-42-2';assert.throws(()=>assess(prior));
+  const oldEvidence=evidenceFixture();oldEvidence.identity.version='1.2.2';assert.throws(()=>evidenceCheck(oldEvidence));
+  validateTags({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.1','1.2.2']});
+});
 test('existing source CI cannot be replaced by a skipped, failed, unrelated or prior-attempt job',()=>{const f=runFixture();f.run.path='.github/workflows/quality-security.yml';f.run.event='push';f.jobs.total_count=2;f.jobs.jobs=f.jobs.jobs.slice(0,2);f.jobs.jobs[0].name='quality-image';validateQuality(f.run,f.jobs,source);for(const change of [x=>x.run.head_sha=tree,x=>x.run.conclusion='failure',x=>x.jobs.jobs[1].conclusion='skipped',x=>x.jobs.jobs[1].run_attempt=1,x=>x.run.path='.github/workflows/other.yml']){const x=clone(f);change(x);assert.throws(()=>validateQuality(x.run,x.jobs,source));}});
 
-function prFixture(){return {env:{GITHUB_REPOSITORY:repository,GITHUB_EVENT_NAME:'pull_request',GITHUB_REF:'refs/pull/2/merge',GITHUB_SHA:tree},event:{repository:{id:repositoryId},number:2,pull_request:{number:2,head:{sha:source,ref:'codex/v1.2.2-security-maintenance',repo:{id:repositoryId}},base:{ref:'main',repo:{id:repositoryId}}}}};}
+function prFixture(){return {env:{GITHUB_REPOSITORY:repository,GITHUB_EVENT_NAME:'pull_request',GITHUB_REF:'refs/pull/2/merge',GITHUB_SHA:tree},event:{repository:{id:repositoryId},number:2,pull_request:{number:2,head:{sha:source,ref:'codex/v1.2.3-security-maintenance',repo:{id:repositoryId}},base:{ref:'main',repo:{id:repositoryId}}}}};}
 test('automatic PR qualification binds actual checked-out head, never the synthetic merge SHA',()=>{
   const f=prFixture(),identity=qualificationIdentity(f.env,f.event,source);
   assert.equal(identity.sourceCommit,source);assert.notEqual(identity.sourceCommit,f.env.GITHUB_SHA);
@@ -287,12 +340,12 @@ test('PR source CI requires the exact head and corresponding same-repository PR'
     x=>x.run.head_branch='other',x=>x.jobs.jobs[1].conclusion='skipped']){const x=clone(f);change(x);assert.throws(()=>validateQuality(x.run,x.jobs,source,q));}
 });
 test('successful PR runs and PR-named artifacts remain rejected by the promotion run validator',()=>{
-  const f=runFixture();f.run.event='pull_request';f.run.head_branch='codex/v1.2.2-security-maintenance';
-  f.artifacts.artifacts[0].name='zevyrn-v1.2.2-pr-qualified-42-2';assert.throws(()=>assess(f));
-  const other=runFixture();other.artifacts.artifacts[0].name='zevyrn-v1.2.2-pr-qualified-42-2';assert.throws(()=>assess(other));
+  const f=runFixture();f.run.event='pull_request';f.run.head_branch='codex/v1.2.3-security-maintenance';
+  f.artifacts.artifacts[0].name='zevyrn-v1.2.3-pr-qualified-42-2';assert.throws(()=>assess(f));
+  const other=runFixture();other.artifacts.artifacts[0].name='zevyrn-v1.2.3-pr-qualified-42-2';assert.throws(()=>assess(other));
 });
 test('PR packets are explicitly non-promotable even if their eligibility flag is tampered',()=>{
-  const expected={purpose:'pr',pullRequest:2},packet={purpose:'pr',promotionEligible:false,context:{purpose:'pr',pullRequest:2,qualityEvent:'pull_request',qualityBranch:'codex/v1.2.2-security-maintenance'}};
+  const expected={purpose:'pr',pullRequest:2},packet={purpose:'pr',promotionEligible:false,context:{purpose:'pr',pullRequest:2,qualityEvent:'pull_request',qualityBranch:'codex/v1.2.3-security-maintenance'}};
   validatePacketPurpose(packet,expected);
   assert.throws(()=>validatePacketPurpose(packet,{purpose:'release',pullRequest:null}));
   assert.throws(()=>validatePacketPurpose({...packet,promotionEligible:true},expected));

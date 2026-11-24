@@ -24,12 +24,12 @@ Relative documentation and screenshot paths remain unchanged.
 Keep existing `keysmith` Compose services, project/image identifiers, proxy route
 filenames, `KEYSMITH_*` variables and external TLS paths for compatibility. The
 retained `keysmith:1.0.0-local` image tag is a local compatibility name; application
-and OCI version metadata is 1.2.2 when built from this source. No legacy Compose change is required.
+and OCI version metadata is 1.2.3 when built from this source. No legacy Compose change is required.
 A repository rename does not require changing application hostnames or deployment
 resources. Historical licenses, dictionary provenance and release notes remain
 historical. Preserve the existing KeySmith v1.0.0 tag/release exactly.
 
-The application version in this source is 1.2.2. A source update does not create a version tag or
+The application version in this source is 1.2.3. A source update does not create a version tag or
 GitHub Release and does not update an existing deployment. Follow
 [INSTALLATION.md](../INSTALLATION.md#updates) when choosing an approved release
 or reviewed commit to install.
@@ -37,7 +37,7 @@ or reviewed commit to install.
 New prebuilt installations use `compose.ghcr.yaml`; see
 [the installation guide](../INSTALLATION.md#prebuilt-image-recommended).
 Optional source builds use `compose.zevyrn.yaml`, `compose.zevyrn.traefik.yaml` or
-`compose.zevyrn.caddy.yaml`, the `zevyrn` service and `zevyrn:1.2.2-local` image.
+`compose.zevyrn.caddy.yaml`, the `zevyrn` service and `zevyrn:1.2.3-local` image.
 Copy `zevyrn.env.example` for the new `ZEVYRN_*` settings. New files accept legacy
 variable fallbacks, but do not provide old Compose service-name aliases.
 Existing installations should follow the [legacy update path](../INSTALLATION.md#existing-installations)

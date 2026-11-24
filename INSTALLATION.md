@@ -1,7 +1,10 @@
 # Docker installation
 
-These instructions target **Zevyrn v1.2.2** from the
+These instructions target **Zevyrn v1.2.3 release preparation** from the
 [canonical GitHub repository](https://github.com/TheStateOfWhere/zevyrn-password-generator).
+The v1.2.3 prebuilt image is not yet published. Prebuilt commands below apply
+after verified publication; use the final source and digest recorded in release
+notes. PR qualification artifacts cannot be used as release images.
 See the [rename notes](docs/REPOSITORY-RENAME.md) for the completed repository
 rename and retained configuration identifiers.
 
@@ -37,17 +40,18 @@ source build, or one complete Zevyrn Traefik/Caddy file for HTTPS. Do not combin
 these files. Existing installations keep their original files; the default
 `compose.yaml` deliberately uses legacy names.
 
-Published public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.2`**, Linux/amd64.
-Verified immutable OCI index:
-`sha256:4992d66fcbc8a73723f2cf9a65eba86f4c4048acdf8359032895ae5e5d4fca31`.
+Planned public image: **`ghcr.io/thestateofwhere/zevyrn:1.2.3`**, Linux/amd64.
+The immutable release OCI index is pending final-source qualification and
+publication. Published v1.2.2 records remain in [release notes](RELEASE-NOTES.md);
+its earlier clean scan does not describe its current vulnerability status.
 The repository and image are public; running instances must remain private/internal.
 Use the registry digest for immutable selection; do not substitute a local image ID.
 
 Requirements: maintained Docker Engine 28+ or Docker Desktop using Linux
 containers, and Docker Compose v2 or newer supporting `--wait` and `--wait-timeout`.
 No host Node/npm, source checkout, database or persistent app volume is needed.
-Download [`compose.ghcr.yaml`](https://github.com/TheStateOfWhere/zevyrn-password-generator/blob/v1.2.2/compose.ghcr.yaml)
-from the v1.2.2 tag into a new directory. It contains only the `zevyrn` app
+After publication, download [`compose.ghcr.yaml`](compose.ghcr.yaml)
+from the v1.2.3 tag into a new directory. It contains only the `zevyrn` app
 service, no build directive, Docker
 socket, host bind mounts or external networks. Commands use a POSIX shell.
 Use your existing Docker access method; do not change daemon permissions.
@@ -70,18 +74,19 @@ Optional `.env` entries (the app requires no environment configuration):
 
 ```dotenv
 ZEVYRN_PORT=18080
-ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.2
+ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.3
 ```
 
 Use an explicit version rather than `latest`. For immutable selection, use this
-alternative `.env` value:
+alternative `.env` value after replacing the placeholder with the published
+v1.2.3 index digest from release notes. Do not use a PR artifact digest:
 
 ```dotenv
-ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.2@sha256:4992d66fcbc8a73723f2cf9a65eba86f4c4048acdf8359032895ae5e5d4fca31
+ZEVYRN_IMAGE=ghcr.io/thestateofwhere/zevyrn:1.2.3@sha256:<PUBLISHED_V1_2_3_INDEX_DIGEST>
 ```
 
 Shell variables override `.env`; keep the same settings for every command.
-The published image can be pulled anonymously. Registry access is needed for
+After public publication, the image can be pulled anonymously. Registry access is needed for
 the initial pull and updates.
 
 ### Access from other internal devices
@@ -161,7 +166,7 @@ OS clipboard history. Browsers/extensions and the OS remain trust dependencies.
 
 The remaining sections describe developer build examples. Build from source as
 shown in [README.md](README.md); `compose.zevyrn*.yaml` uses the local
-`zevyrn:1.2.2-local` image, not GHCR. It needs Git and Buildx, with registry,
+`zevyrn:1.2.3-local` image, not GHCR. It needs Git and Buildx, with registry,
 npm and Alpine access for the first build. A new build does not inherit the
 retained release image's qualification. The standalone default needs no
 environment file. For remote browsers, choose an HTTPS alternative below.
@@ -175,8 +180,8 @@ qualification archives are not build prerequisites. Manually converted CRLF
 or altered files fail closed.
 
 This contract is distinct from reproducing the old qualified CRLF artifact.
-Development tests alone do not qualify a newly built image. Published v1.2.2
-passed the release qualification and approved builder policy described in
+Development tests alone do not qualify a newly built image. The prepared v1.2.3
+source requires its own release qualification and protected publication under
 [SECURITY.md](SECURITY.md#published-release-qualification).
 
 ## Choose a hostname and client trust
@@ -339,7 +344,7 @@ curl --fail http://127.0.0.1:18080/healthz
 ```
 
 - **Image cannot be pulled:** confirm publication/public visibility, exact name,
-  version and architecture. The v1.2.2 image is publicly retrievable for Linux/amd64.
+  version and architecture. The v1.2.3 image is unavailable until publication completes.
 - **Port already allocated:** choose another `ZEVYRN_PORT`, run `config` again,
   and use that port in your browser/health request. Do not stop unrelated apps.
 - **Exited/restarting:** inspect the exit code, `OOMKilled`, error and bounded
@@ -445,7 +450,7 @@ The original `compose.yaml`, `compose.traefik.yaml`, `compose.caddy.yaml`,
 network support boundary also applies to these examples. Keep the same project,
 service, `KEYSMITH_*` settings, external certificates and any operator-specific
 proxy configuration. The local image name `keysmith:1.0.0-local` is a retained
-compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.2.
+compatibility identifier; rebuilding it from this source produces Zevyrn v1.2.3.
 Do not switch to a Zevyrn project/service as an ordinary update: Compose would
 create a separate installation and may conflict on ports. No migration is required.
 

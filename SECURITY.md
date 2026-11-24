@@ -40,14 +40,16 @@ around errors, or commit secrets and certificate keys.
 
 ## Published release qualification
 
-The v1.2.2 [qualification workflow](.github/workflows/qualify-maintenance-image.yml)
+The prepared v1.2.3 [qualification workflow](.github/workflows/qualify-maintenance-image.yml)
 binds source commit/tree, an exact Linux/amd64 OCI archive, runtime assets,
 builder/runtime vulnerability and secret scans, image-configuration secret scans,
 runtime SBOM, hardened runtime checks and eight Microsoft Edge browser suites.
 The [protected publication workflow](.github/workflows/publish-maintenance-image.yml)
 verifies the retained evidence, performs fresh runtime scanning and promotes the
 same OCI archive without rebuilding it. See [release notes](RELEASE-NOTES.md)
-for the published source, digest and successful public workflow records.
+for published historical records. v1.2.3 is not yet published: its final source
+and release digest require fresh release qualification. PR-only artifacts are
+not eligible for publication.
 
 Runtime HIGH/CRITICAL findings or detected secrets block acceptance. Builder
 CRITICAL findings, detected secrets and unapproved HIGH findings also block.
@@ -57,10 +59,17 @@ The three exact builder-only Undici 6.29.0 HIGH exceptions are recorded in
 They do not apply to the runtime or other package/version/path occurrences,
 and accepted findings remain visible rather than being removed from reports.
 
-At publication on 2026-11-17, the runtime had no HIGH/CRITICAL findings or
+At v1.2.2 publication on 2026-11-17, the runtime had no HIGH/CRITICAL findings or
 detected secrets, but retained MEDIUM `CVE-2026-94287` in `libxpm 3.5.19-r0`
 (reported fix: `3.5.20-r0`). These are dated scan results, not a claim of
 vulnerability freedom or current clearance for a different build.
+
+On 2026-11-24, fresh scanning of the published v1.2.2 digest found four CRITICAL
+and three HIGH runtime findings. The accepted Phase 1 candidate at
+`6b450f0f3663706302529f9a19025061677782d9` remediated all reported runtime findings;
+see the candidate workflow records in [release notes](RELEASE-NOTES.md).
+Changing its version metadata to v1.2.3 creates a new source/artifact identity
+and does not transfer that candidate's qualification.
 
 The historical [builder-versus-runtime policy proposal](docs/release-security-policy-proposal.md)
 remains a proposal, not active policy or an exception approval. Its historical
