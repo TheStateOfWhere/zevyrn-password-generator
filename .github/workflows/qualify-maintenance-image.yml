@@ -1,8 +1,5 @@
 name: Qualify Zevyrn v1.2.3 artifact
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       source_commit:

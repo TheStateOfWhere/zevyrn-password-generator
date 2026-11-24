@@ -1,6 +1,7 @@
 // Small, version-specific validators. Artifact transport and orchestration use GitHub Actions.
 import assert from 'node:assert/strict';
-import {readFile,writeFile,readdir,lstat} from 'node:fs/promises';
+import {readFile,writeFile,readdir,lstat,mkdir,open} from 'node:fs/promises';
+import {createRequire} from 'node:module';
 import {readFileSync} from 'node:fs';
 import {resolve,relative,sep} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -304,8 +305,193 @@ export function validateQuality(info,jobs,source,qualification={purpose:'release
 }
 const writeJSON=(path,value)=>writeFile(path,JSON.stringify(value,null,2)+'\n');
 const readJSON=async path=>json(await readFile(path));
+const qualityWorkflow='.github/workflows/quality-security.yml';
+codes.add('QUALITY_ZIP_INVALID');
+codes.add('QUALITY_ZIP_CHECKSUM_MISMATCH');
+function zipExtraFields(fields,length) {
+  assert(fields.reduce((size,f)=>size+4+f.data.length,0)===length,'Malformed ZIP extra fields');
+  const seen=new Set();for(const field of fields){
+    assert(!seen.has(field.id));seen.add(field.id);
+    // ZIP64 sizes/offsets and the single Unix mtime used by the pinned upload tooling.
+    assert(field.id===1&&[8,16,24,28].includes(field.data.length)
+      ||field.id===0x5455&&field.data.length===5&&field.data[0]===1,'Unsupported ZIP extra field');
+  }
+}
+export async function qualityZip(bytes,expectedDigest,destination) {
+  stage('QUALITY_ZIP_CHECKSUM_MISMATCH',()=>{sha(expectedDigest);assert('sha256:'+hash(bytes)===expectedDigest);});
+  return stageAsync('QUALITY_ZIP_INVALID',async()=>{
+    // Reuse the ZIP reader already shipped in locked Playwright; no new dependency.
+    const {yauzl}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+    const {crc32}=await import('node:zlib');assert(typeof crc32==='function');
+    const zip=await yauzl.fromBufferPromise(bytes,{lazyEntries:true,decodeStrings:false,autoClose:false,validateEntrySizes:true});
+    try {
+      assert(zip.entryCount>0&&zip.entryCount<=10000&&zip.comment.length===0);
+      const centralStart=zip.readEntryCursor,entries=[],paths=new Map(),fileHashes=new Map(),ranges=[];
+      let record,total=0,centralCursor=centralStart;
+      for await(const entry of zip.eachEntry()) {
+        assert(Buffer.isBuffer(entry.fileName)&&entry.fileName.every(c=>c>=0x20&&c<=0x7e));
+        const name=entry.fileName.toString('ascii'),directory=name.endsWith('/'),path=directory?name.slice(0,-1):name;
+        safeAssetPath(path);assert(!paths.has(path.toLowerCase()),'Duplicate or colliding ZIP path');paths.set(path.toLowerCase(),{path,directory});
+        const os=entry.versionMadeBy>>>8,mode=entry.externalFileAttributes>>>16,type=mode&0xf000,dos=entry.externalFileAttributes&0xffff;
+        assert([0,3].includes(os)&&!(mode&0o7000)&&!(dos&~0x31)&&entry.internalFileAttributes===0);
+        assert(type===(directory?0x4000:0x8000)||os===0&&mode===0,'Unsupported ZIP filesystem type');
+        assert(!(dos&0x10)||directory);assert(!directory||type===0x4000||!!(dos&0x10));
+        assert([10,20,45].includes(entry.versionNeededToExtract)&&[0,8].includes(entry.compressionMethod));
+        assert(!(entry.generalPurposeBitFlag&~0x808)&&entry.fileComment.length===0,'Unsupported ZIP flags/comment');
+        zipExtraFields(entry.extraFields,entry.extraFieldLength);
+        const centralLarge=entry.extraFields.find(f=>f.id===1)?.data;
+        const centralSizes64=bytes.readUInt32LE(centralCursor+24)===0xffffffff||bytes.readUInt32LE(centralCursor+20)===0xffffffff;
+        const largeLength=(bytes.readUInt32LE(centralCursor+24)===0xffffffff?8:0)+(bytes.readUInt32LE(centralCursor+20)===0xffffffff?8:0)+(bytes.readUInt32LE(centralCursor+42)===0xffffffff?8:0)+(bytes.readUInt16LE(centralCursor+34)===0xffff?4:0);
+        assert((centralLarge?.length??0)===largeLength);centralCursor=zip.readEntryCursor;
+        assert(Number.isSafeInteger(entry.uncompressedSize)&&entry.uncompressedSize>=0&&entry.uncompressedSize<=512*1024*1024);
+        total+=entry.uncompressedSize;assert(total<=1024*1024*1024);
+        if(directory)assert(entry.uncompressedSize===0);
+        if(path==='quality.json')assert(!directory&&entry.uncompressedSize<=4*1024*1024);
+        const local=await zip.readLocalFileHeaderPromise(entry);
+        same(local.fileName,entry.fileName);
+        // A streaming writer can discover ZIP64 requirements only at finalization.
+        assert(local.versionNeededToExtract===entry.versionNeededToExtract||!!centralLarge&&entry.versionNeededToExtract===45&&[10,20].includes(local.versionNeededToExtract));
+        for(const key of ['generalPurposeBitFlag','compressionMethod','lastModFileTime','lastModFileDate'])same(local[key],entry[key]);
+        const extra=yauzl.parseExtraFields(local.extraField);zipExtraFields(extra,local.extraFieldLength);
+        const large=centralSizes64||local.uncompressedSize===0xffffffff||local.compressedSize===0xffffffff;
+        const sizes=extra.find(f=>f.id===1)?.data;let sizeOffset=0;
+        for(const key of ['uncompressedSize','compressedSize']) {
+          let size=local[key];if(size===0xffffffff){assert(sizes&&sizeOffset+8<=sizes.length);size=Number(sizes.readBigUInt64LE(sizeOffset));sizeOffset+=8;}
+          assert(size===entry[key]||!!(entry.generalPurposeBitFlag&8)&&size===0,'Conflicting ZIP sizes');
+        }
+        assert((sizes?.length??0)===sizeOffset);
+        assert(local.crc32===entry.crc32||!!(entry.generalPurposeBitFlag&8)&&local.crc32===0);
+        let end=local.fileDataStart+entry.compressedSize;
+        if(entry.generalPurposeBitFlag&8) {
+          assert(bytes.readUInt32LE(end)===0x08074b50,'Unsupported ZIP data descriptor');
+          assert(bytes.readUInt32LE(end+4)===entry.crc32);
+          same(large?[Number(bytes.readBigUInt64LE(end+8)),Number(bytes.readBigUInt64LE(end+16))]:[bytes.readUInt32LE(end+8),bytes.readUInt32LE(end+12)],[entry.compressedSize,entry.uncompressedSize]);
+          end+=large?24:16;
+        }
+        assert(end<=centralStart);ranges.push([entry.relativeOffsetOfLocalHeader,end]);
+        const stream=await zip.openReadStreamPromise(entry),digest=createHash('sha256'),chunks=[];let crc=0,length=0;
+        for await(const chunk of stream){length+=chunk.length;assert(length<=entry.uncompressedSize);crc=crc32(chunk,crc);digest.update(chunk);if(path==='quality.json')chunks.push(chunk);}
+        assert(length===entry.uncompressedSize&&crc===entry.crc32,'ZIP payload integrity');
+        if(!directory){fileHashes.set(path,digest.digest('hex'));if(path==='quality.json')record=json(Buffer.concat(chunks));}
+        entries.push({entry,path,directory});
+      }
+      // Require one unambiguous contiguous local graph and central directory, including ZIP64.
+      let cursor=0;for(const [start,end] of ranges.sort((a,b)=>a[0]-b[0])){assert(start===cursor);cursor=end;}assert(cursor===centralStart);
+      const trailer=bytes.length-22;assert(bytes.readUInt32LE(trailer)===0x06054b50&&bytes.readUInt16LE(trailer+20)===0);
+      let centralSize=bytes.readUInt32LE(trailer+12),centralEnd=trailer;
+      if(bytes.readUInt32LE(trailer-20)===0x07064b50||bytes.readUInt32LE(trailer+16)===0xffffffff||centralSize===0xffffffff||bytes.readUInt16LE(trailer+10)===0xffff){
+        const locator=trailer-20;assert(bytes.readUInt32LE(locator)===0x07064b50&&bytes.readUInt32LE(locator+4)===0&&bytes.readUInt32LE(locator+16)===1);
+        centralEnd=Number(bytes.readBigUInt64LE(locator+8));assert(bytes.readUInt32LE(centralEnd)===0x06064b50&&bytes.readBigUInt64LE(centralEnd+4)===44n&&centralEnd+56===locator);
+        assert(bytes.readUInt32LE(centralEnd+16)===0&&bytes.readUInt32LE(centralEnd+20)===0);
+        assert(Number(bytes.readBigUInt64LE(centralEnd+24))===zip.entryCount&&Number(bytes.readBigUInt64LE(centralEnd+32))===zip.entryCount);
+        centralSize=Number(bytes.readBigUInt64LE(centralEnd+40));assert(Number(bytes.readBigUInt64LE(centralEnd+48))===centralStart);
+      } else assert(bytes.readUInt32LE(trailer+16)===centralStart);
+      for(const offset of [8,10])assert(bytes.readUInt16LE(trailer+offset)===zip.entryCount||bytes.readUInt16LE(trailer+offset)===0xffff);
+      for(const [offset,value] of [[12,centralSize],[16,centralStart]])assert(bytes.readUInt32LE(trailer+offset)===value||bytes.readUInt32LE(trailer+offset)===0xffffffff);
+      assert(bytes.readUInt16LE(trailer+4)===0&&bytes.readUInt16LE(trailer+6)===0&&zip.readEntryCursor===centralStart+centralSize&&zip.readEntryCursor===centralEnd);
+      assert(record?.schemaVersion===1&&record.purpose==='quality'&&record.promotionEligible===false&&record.files&&typeof record.files==='object'&&!Array.isArray(record.files));
+      assert(!Object.hasOwn(record.files,'quality.json')&&!Object.hasOwn(record.files,'browser-results.json'));
+      const expectedDirectories=new Set();for(const [path,digest] of Object.entries(record.files)){
+        safeAssetPath(path);assert(hex.test(digest));const parts=path.split('/');while(parts.length>1){parts.pop();expectedDirectories.add(parts.join('/'));}
+      }
+      const canonical=new Map();for(const {path,directory} of entries){
+        if(directory)assert(expectedDirectories.has(path),'Unexpected ZIP directory');
+        const parts=path.split('/');while(parts.length){const prefix=parts.join('/'),old=canonical.get(prefix.toLowerCase());assert(!old||old===prefix,'Case-colliding ZIP directory');canonical.set(prefix.toLowerCase(),prefix);parts.pop();if(parts.length){const parent=paths.get(parts.join('/').toLowerCase());assert(!parent||parent.directory&&parent.path===parts.join('/'),'Conflicting ZIP parent');}}
+      }
+      fileHashes.delete('quality.json');same(Object.fromEntries(fileHashes),record.files);
+      if(destination){
+        // No filesystem writes until the complete archive has passed. Never follow an existing destination.
+        await mkdir(destination);
+        for(const {entry,path,directory} of entries)if(!directory){
+          const target=resolve(destination,path),parent=resolve(target,'..');await mkdir(parent,{recursive:true});
+          const file=await open(target,'wx');try{for await(const chunk of await zip.openReadStreamPromise(entry))await file.writeFile(chunk);}finally{await file.close();}
+        }
+      }
+      return {files:fileHashes.size,promotionEligible:false};
+    } finally {zip.close();}
+  });
+}
+async function stageAsync(code,operation){try{return await operation();}catch(error){if(failureCodes.has(error))throw error;const failure=new Error();failureCodes.set(failure,code);throw failure;}}
+export function qualityIdentity(env,event,checkedOutCommit,sourceTree) {
+  assert(env.GITHUB_REPOSITORY===repository&&event.repository?.id===repositoryId);
+  assert(env.GITHUB_WORKFLOW_REF===`${repository}/${qualityWorkflow}@${env.GITHUB_REF}`);
+  commit(checkedOutCommit);commit(sourceTree);commit(env.GITHUB_SHA);
+  assert(checkedOutCommit===env.QUALITY_SOURCE);
+  let pullRequest=null,headRepositoryId=repositoryId;
+  if(env.GITHUB_EVENT_NAME==='pull_request') {
+    const pr=event.pull_request;pullRequest=event.number;
+    assert(Number.isSafeInteger(pullRequest)&&pullRequest>0&&pr?.number===pullRequest);
+    assert(env.GITHUB_REF===`refs/pull/${pullRequest}/merge`&&pr.base?.repo?.id===repositoryId);
+    // Forks and Dependabot remain read-only quality inputs, never release authority.
+    assert(Number.isSafeInteger(pr.head?.repo?.id)&&pr.head.repo.id>0&&pr.head.sha===checkedOutCommit);
+    headRepositoryId=pr.head.repo.id;
+  } else {
+    assert(['push','schedule','workflow_dispatch'].includes(env.GITHUB_EVENT_NAME));
+    assert(env.GITHUB_REF.startsWith('refs/heads/')&&env.GITHUB_SHA===checkedOutCommit);
+    if(env.GITHUB_EVENT_NAME!=='workflow_dispatch')assert(env.GITHUB_REF==='refs/heads/main');
+  }
+  const runId=Number(env.GITHUB_RUN_ID),runAttempt=Number(env.GITHUB_RUN_ATTEMPT);
+  assert(Number.isSafeInteger(runId)&&runId>0&&Number.isSafeInteger(runAttempt)&&runAttempt>0);
+  return {purpose:'quality',promotionEligible:false,repositoryId,headRepositoryId,workflow:qualityWorkflow,event:env.GITHUB_EVENT_NAME,pullRequest,sourceCommit:checkedOutCommit,sourceTree,runId,runAttempt};
+}
+export function validateQualityArtifact(artifact,expected,id,digest) {
+  assert(expected.purpose==='quality'&&expected.promotionEligible===false);
+  assert(expected.workflow===qualityWorkflow&&expected.repositoryId===repositoryId);
+  sha(digest);assert(Number.isSafeInteger(id)&&id>0&&artifact.id===id&&artifact.digest===digest&&!artifact.expired);
+  assert(artifact.name===`quality-runtime-${expected.runId}-${expected.runAttempt}`&&artifact.size_in_bytes>0);
+  const run=artifact.workflow_run;
+  assert(run?.id===expected.runId&&run.repository_id===repositoryId&&run.head_sha===expected.sourceCommit);
+  assert(run.head_repository_id===expected.headRepositoryId);
+}
+export function validateQualityRecord(record,expected,files,identity) {
+  assert(expected.purpose==='quality'&&expected.promotionEligible===false);
+  assert(expected.workflow===qualityWorkflow&&expected.repositoryId===repositoryId);
+  assert(record.schemaVersion===1&&record.purpose==='quality'&&record.promotionEligible===false);
+  same(record.context,expected);same(record.files,files);
+  for(const name of ['archive.oci.tar','identity.json','assets.json','health.json','runtime-scan.json','runtime-scan-identity.json','builder-scan.json','scanner-version.json','runtime-sbom.cdx.json','npm-audit.json'])assert(Object.hasOwn(files,name),'Missing quality evidence: '+name);
+  for(const value of Object.values(files))assert(hex.test(value));
+  assert(hex.test(record.archiveSHA256)&&record.archiveSHA256===files['archive.oci.tar']);sha(record.indexDigest);
+  for(const key of ['sourceCommit','sourceTree'])same(identity[key],expected[key]);
+  for(const key of ['archiveSHA256','indexDigest'])same(record[key],identity[key]);
+}
+export function validateQualitySecurity(identity,evidence) {
+  validateCompleteScanEvidence(identity,evidence.scanIdentity,evidence.sbom);
+  for(const role of ['runtime','builder'])assert(evidence[role]?.blocked===false&&evidence[role].blockingVulnerabilities===0&&evidence[role].secrets===0);
+  assert(evidence.runtime.imageID===identity.configDigest);
+  assert(Array.isArray(evidence.runtime.results)&&evidence.runtime.results.length>0);
+  for(const result of evidence.runtime.results){
+    assert(Array.isArray(result.vulnerabilities)&&Array.isArray(result.secrets)&&result.secrets.length===0);
+    for(const finding of result.vulnerabilities)assert(['UNKNOWN','LOW','MEDIUM'].includes(finding.severity?.toUpperCase())&&!finding.exception);
+  }
+  validateBuilderAcceptance(evidence.builder,builderExceptions);
+  assert(evidence.npm?.blocked===false&&evidence.npm.counts.high===0&&evidence.npm.counts.critical===0);
+  assert(sanitizedScannerMetadata(evidence.scanner),'Missing scanner evidence');
+  assert(evidence.health?.passed===true&&evidence.health.archiveSHA256===identity.archiveSHA256&&evidence.health.indexDigest===identity.indexDigest);
+  same(evidence.health.checks,['image-config-and-rootfs','container-hardening','health','nginx-config','headers','assets','no-build-tools','graceful-stop']);
+}
+export function validateQualityBrowser(identity,browser,expected) {
+  assert(expected.purpose==='quality'&&expected.promotionEligible===false&&expected.workflow===qualityWorkflow&&expected.repositoryId===repositoryId);
+  for(const [key,value] of Object.entries(expected))same(browser[key],value);
+  for(const key of ['archiveSHA256','indexDigest','assetsSHA256'])same(browser[key],identity[key]);
+  same(browser.suites,suites.map(name=>({name,conclusion:'success'})));
+}
+async function qualityPacket(directory,ctx,recording=false) {
+  assert(ctx.purpose==='quality'&&ctx.promotionEligible===false);
+  const identity=await readJSON(resolve(directory,'identity.json'));
+  same(identity.sourceCommit,ctx.sourceCommit);same(identity.sourceTree,ctx.sourceTree);
+  same(await inspectArchive(resolve(directory,'archive.oci.tar'),ctx.sourceCommit),Object.fromEntries(Object.entries(identity).filter(([k])=>!['sourceTree','assetsSHA256'].includes(k))));
+  await verifyRetainedAssets(directory,identity);
+  const evidence={};for(const [name,file] of Object.entries({runtime:'runtime-scan.json',builder:'builder-scan.json',scanIdentity:'runtime-scan-identity.json',sbom:'runtime-sbom.cdx.json',scanner:'scanner-version.json',npm:'npm-audit.json',health:'health.json'}))evidence[name]=await readJSON(resolve(directory,file));
+  validateQualitySecurity(identity,evidence);
+  const files=await snapshot(directory);delete files['quality.json'];delete files['browser-results.json'];
+  const record=recording?{schemaVersion:1,purpose:'quality',promotionEligible:false,context:ctx,archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,files}:await readJSON(resolve(directory,'quality.json'));
+  validateQualityRecord(record,ctx,files,identity);
+  if(recording)await writeJSON(resolve(directory,'quality.json'),record);
+  return identity;
+}
 const context=()=>{
   const checkedOut=run('git',['rev-parse','HEAD']).toString().trim();
+  if(process.env.QUALITY_SOURCE)return qualityIdentity(process.env,json(readFileSync(process.env.GITHUB_EVENT_PATH)),checkedOut,run('git',['rev-parse','HEAD^{tree}']).toString().trim());
   const identity=process.env.QUALIFICATION_KIND
     ?qualificationIdentity(process.env,json(readFileSync(process.env.GITHUB_EVENT_PATH)),checkedOut)
     :{purpose:'release',sourceCommit:process.env.GITHUB_SHA,pullRequest:null,qualityEvent:'push',qualityBranch:'main'};
@@ -339,7 +525,14 @@ export async function verifyPacket(directory,expected) {
 }
 async function main() {
   const [mode,...args]=process.argv.slice(2);
-  if(mode==='qualification-context'){
+  if(mode==='quality-record'||mode==='quality-verify')await qualityPacket(args[0],context(),mode==='quality-record');
+  else if(mode==='quality-artifact')validateQualityArtifact(await readJSON(args[0]),context(),Number(args[1]),args[2]);
+  else if(mode==='quality-zip')await qualityZip(await readFile(args[0]),args[1],args[2]);
+  else if(mode==='quality-browser-result'){
+    const ctx=context(),identity=await qualityPacket(args[0],ctx);
+    validateQualityBrowser(identity,await readJSON(resolve(args[0],'browser-results.json')),ctx);
+  }
+  else if(mode==='qualification-context'){
     const ctx=context();
     assert(process.env.GITHUB_OUTPUT);
     await writeFile(process.env.GITHUB_OUTPUT,`purpose=${ctx.purpose}\nsource_commit=${ctx.sourceCommit}\nquality_event=${ctx.qualityEvent}\nquality_branch=${ctx.qualityBranch}\n`,{flag:'a'});
@@ -395,11 +588,19 @@ async function main() {
   } else if(mode==='check-assets')same((await assetSnapshot(args[0])).files,await readJSON(args[1]));
   else if(mode==='browser'){
     const directory=args[0],identity=await readJSON(resolve(directory,'identity.json')),ctx=context();
-    const inspected=await inspectArchive(resolve(directory,'archive.oci.tar'),ctx.sourceCommit);
-    same(inspected,Object.fromEntries(Object.entries(identity).filter(([k])=>!['sourceTree','assetsSHA256'].includes(k))));
+    if(ctx.purpose==='quality')await qualityPacket(directory,ctx);
+    else {
+      const inspected=await inspectArchive(resolve(directory,'archive.oci.tar'),ctx.sourceCommit);
+      same(inspected,Object.fromEntries(Object.entries(identity).filter(([k])=>!['sourceTree','assetsSHA256'].includes(k))));
+    }
     assert(identity.sourceTree===ctx.sourceTree&&identity.assetsSHA256===hash(await readFile(resolve(directory,'assets.json'))));
     const assets=await verifyRetainedAssets(directory,identity);same((await assetSnapshot('dist')).files,assets);
-    const results=[];for(const name of suites){const r=spawnSync(process.execPath,['tests/browser-'+name+'.mjs'],{stdio:'inherit'});assert(r.status===0,'Browser suite failed: '+name);results.push({name,conclusion:'success'});}
+    const results=[];for(const name of suites){
+      const r=spawnSync(process.execPath,['tests/browser-'+name+'.mjs'],{stdio:'inherit'});
+      results.push({name,conclusion:r.status===0?'success':'failure'});
+      if(r.status!==0&&ctx.purpose==='quality')await writeJSON(resolve(directory,'browser-results.json'),{...ctx,archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,assetsSHA256:identity.assetsSHA256,suites:results});
+      assert(r.status===0,'Browser suite failed: '+name);
+    }
     same((await assetSnapshot('dist')).files,assets);await verifyRetainedAssets(directory,identity);
     await writeJSON(resolve(directory,'browser-results.json'),{...ctx,archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,assetsSHA256:identity.assetsSHA256,suites:results});
   }

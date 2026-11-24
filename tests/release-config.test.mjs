@@ -7,8 +7,70 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { screenshotDirectory } from './browser-artifacts.mjs';
 const read = name => readFile(new URL('../'+name, import.meta.url), 'utf8');
+
+test('quality retains exact image/browser coverage with read-only fork-safe artifact transport', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
+  const workflow=yaml.parse(await read('.github/workflows/quality-security.yml'));
+  assert.deepEqual(workflow.permissions,{contents:'read'});
+  assert(!workflow.on.pull_request_target&&!workflow.on.workflow_run);
+  assert(Object.hasOwn(workflow.on,'pull_request'));assert(Object.hasOwn(workflow.on,'push'));
+  assert.equal(workflow.env.QUALITY_SOURCE,'${{ github.event.pull_request.head.sha || github.sha }}');
+  assert.deepEqual(Object.keys(workflow.jobs).sort(),['browser','quality-image']);
+  const image=workflow.jobs['quality-image'],browser=workflow.jobs.browser;
+  assert.equal(browser.needs,'quality-image');assert.deepEqual(browser.permissions,{contents:'read',actions:'read'});
+  for(const job of [image,browser]) {
+    assert(!job.environment&&!job.secrets);
+    const checkout=job.steps.find(step=>step.uses?.startsWith('actions/checkout@'));
+    assert.equal(checkout.with.ref,'${{ env.QUALITY_SOURCE }}');assert.equal(checkout.with['persist-credentials'],false);
+    for(const step of job.steps)assert(!step['continue-on-error']);
+    assert(!JSON.stringify(job).includes('secrets.'));
+  }
+  const script=image.steps.map(step=>step.run??'').join('\n');
+  for(const text of ['type=oci,dest=artifacts/security/archive.oci.tar','--provenance=mode=min','release-integrity.mjs loaded','release-integrity.mjs assets','prepare-scan','scan-runtime','sbom-runtime','quality-record','ci-security.mjs trivy','--target build --load','--driver docker-container'])assert(script.includes(text),text);
+  for(const text of ['npm test','tsc6 --noEmit','ZEVYRN_COMPOSE_BIN','compilerPolicy','npm audit','container-hardening','graceful-stop'])assert(script.includes(text),text);
+  const packet=image.steps.find(step=>step.id==='packet');assert.equal(packet.with.name,'quality-runtime-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.equal(image.outputs.artifact_digest,'sha256:${{ steps.packet.outputs.artifact-digest }}');
+  const diagnostics=image.steps.find(step=>step.with?.name==='security-evidence');assert.equal(diagnostics.if,'always()');
+  assert(!/archive\.oci|identity\.json|assets\//.test(diagnostics.with.path));
+  const transport=browser.steps.find(step=>step.name==='Authenticate exact same-run artifact before extraction').run;
+  assert(transport.indexOf('quality-artifact')<transport.indexOf('quality-zip'));
+  assert.match(transport,/quality-zip \$zip \$env:ARTIFACT_DIGEST packet\n\s*if \(\$LASTEXITCODE -ne 0\)/);
+  assert(!transport.includes('Expand-Archive'));
+  assert(transport.indexOf('quality-verify')>transport.indexOf('quality-zip'));
+  const browserScript=browser.steps.map(step=>step.run??'').join('\n');
+  assert(!browserScript.includes('npm run build'));
+  assert(browserScript.includes('packet/assets'));assert(browserScript.includes('release-integrity.mjs browser packet'));assert(browserScript.includes('quality-browser-result'));
+});
+
+test('qualification is manual-only and preserves exact release source, evidence and publication contracts', {skip:!existsSync('.github/workflows/qualify-maintenance-image.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
+  const qualifier=yaml.parse(await read('.github/workflows/qualify-maintenance-image.yml'));
+  assert.deepEqual(Object.keys(qualifier.on),['workflow_dispatch']);
+  assert.deepEqual(qualifier.on.workflow_dispatch.inputs.source_commit,{description:'Exact approved main commit containing v1.2.3 metadata',required:true,type:'string'});
+  assert.deepEqual(Object.keys(qualifier.jobs).sort(),['browser','runtime','seal']);
+  assert.deepEqual(qualifier.permissions,{contents:'read',actions:'read'});
+  assert.equal(qualifier.concurrency['cancel-in-progress'],false);
+  assert.equal(qualifier.jobs.browser.needs,'runtime');assert.deepEqual(qualifier.jobs.seal.needs,['runtime','browser']);
+  const runtime=qualifier.jobs.runtime.steps;
+  const init=runtime.find(step=>step.id==='init');assert(init.run.includes('release-integrity.mjs qualification-context'));
+  assert(init.run.includes('test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE"'));
+  const prerequisite=runtime.find(step=>step.name==='Require matching successful source CI without a parallel-run race');
+  assert(prerequisite.run.includes('--workflow quality-security.yml --commit "$QUALIFICATION_SOURCE" --event "$QUALITY_EVENT" --branch "$QUALITY_BRANCH"'));
+  assert(prerequisite.run.includes('release-integrity.mjs quality'));
+  assert(qualifier.jobs.seal.steps.some(step=>step.run==='node scripts/release-integrity.mjs seal packet'));
+  const quality=yaml.parse(await read('.github/workflows/quality-security.yml'));
+  assert(Object.hasOwn(quality.on,'pull_request'));
+  const publisher=yaml.parse(await read('.github/workflows/publish-maintenance-image.yml'));
+  assert.deepEqual(Object.keys(publisher.on),['workflow_dispatch']);
+  assert.equal(publisher.jobs.promote.environment,'zevyrn-ghcr-publication');
+  assert.deepEqual(publisher.jobs.validate.permissions,{contents:'read',actions:'read'});
+  assert.deepEqual(publisher.jobs.promote.permissions,{contents:'read',actions:'read',packages:'write'});
+  const promotion=publisher.jobs.promote.steps.map(step=>step.run??'').join('\n');
+  assert(promotion.includes('age<=3600000'));assert(promotion.includes('--all --preserve-digests'));
+});
 
 test('standalone is loopback-only; HTTPS alternatives do not publish the backend', async () => {
   const local = await read('compose.yaml');
