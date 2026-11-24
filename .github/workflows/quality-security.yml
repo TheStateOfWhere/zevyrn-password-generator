@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: read
+env:
+  QUALITY_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
 concurrency:
   group: quality-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -17,12 +19,16 @@ jobs:
   quality-image:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.packet.outputs.artifact-id }}
+      artifact_digest: sha256:${{ steps.packet.outputs.artifact-digest }}
     env:
       TRIVY_DISABLE_TELEMETRY: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.QUALITY_SOURCE }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.1'
@@ -73,20 +79,37 @@ jobs:
           docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' > artifacts/security/nginx-base-manifest.json
           jq --exit-status --arg digest "$digest" '.digest == $digest and ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length == 1)' artifacts/security/nginx-base-manifest.json
           jq --exit-status '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")][0].digest == "sha256:0616b208d25086f7a903e993626c56193787307fec4423bf7d3ce77194d2b1c5"' artifacts/security/nginx-base-manifest.json
-      - name: Build separate builder and runtime images
+      - name: Build builder and retained runtime OCI with shared BuildKit cache
         id: images
+        shell: bash
         run: |
-          docker build --platform linux/amd64 --target build -t zevyrn-ci-builder .
-          docker build --platform linux/amd64 -t zevyrn-ci-runtime .
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
           mkdir -p artifacts/security
+          docker buildx create --name "zevyrn-quality-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --driver docker-container --use
+          docker buildx build --platform linux/amd64 --target build --load -t zevyrn-ci-builder .
+          docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$QUALITY_SOURCE" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag zevyrn-ci-runtime --output type=oci,dest=artifacts/security/archive.oci.tar --metadata-file artifacts/security/build-metadata.json .
+          node scripts/release-integrity.mjs inspect artifacts/security/archive.oci.tar artifacts/security/identity.json artifacts/security/inspection.json
+          skopeo copy --override-os linux --override-arch amd64 oci-archive:artifacts/security/archive.oci.tar docker-daemon:zevyrn-ci-runtime:latest
+          docker image inspect zevyrn-ci-runtime > "$RUNNER_TEMP/loaded.json"
+          node scripts/release-integrity.mjs loaded artifacts/security/identity.json "$RUNNER_TEMP/loaded.json"
+          container="zevyrn-assets-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker create --name "$container" zevyrn-ci-runtime
+          mkdir artifacts/security/assets
+          docker cp "$container:/usr/share/nginx/html/." artifacts/security/assets/
+          node scripts/release-integrity.mjs assets artifacts/security dist
           docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}} user={{with index .Config "User"}}{{.}}{{else}}0 (Docker default){{end}}' zevyrn-ci-builder > artifacts/security/image-identities.txt
           docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}} user={{.Config.User}}' zevyrn-ci-runtime >> artifacts/security/image-identities.txt
           test "$(docker image inspect --format '{{.Config.User}}' zevyrn-ci-runtime)" = '10001:10001'
-          printf 'source=%s\n' "$GITHUB_SHA" >> artifacts/security/image-identities.txt
+          printf 'source=%s\n' "$QUALITY_SOURCE" >> artifacts/security/image-identities.txt
           docker image inspect --format 'registry-digests={{json .RepoDigests}}' zevyrn-ci-builder zevyrn-ci-runtime >> artifacts/security/image-identities.txt
           grep '^FROM ' Dockerfile >> artifacts/security/image-identities.txt
-          docker save -o "$RUNNER_TEMP/runtime.tar" zevyrn-ci-runtime
           docker save -o "$RUNNER_TEMP/builder.tar" zevyrn-ci-builder
+      - name: Prepare image-bound runtime scan archive
+        id: scan_archive
+        run: node scripts/release-integrity.mjs prepare-scan artifacts/security/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/security/runtime-scan-identity.json
       - name: Verified scanner and fresh vulnerability database
         id: scanner
         shell: bash
@@ -101,11 +124,11 @@ jobs:
           date --utc --iso-8601=seconds > artifacts/security/scan-start.txt
       - name: Scan runtime vulnerabilities and secrets
         id: runtime_scan
-        if: ${{ !cancelled() && steps.images.outcome == 'success' && steps.scanner.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scan_archive.outcome == 'success' && steps.scanner.outcome == 'success' }}
         env:
           TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
-          trivy image --input "$RUNNER_TEMP/runtime.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/runtime-raw.json"
+          node scripts/release-integrity.mjs scan-runtime "$(command -v trivy)" artifacts/security/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/security/runtime-scan-identity.json "$RUNNER_TEMP/runtime-raw.json"
           node scripts/ci-security.mjs report runtime "$RUNNER_TEMP/runtime-raw.json" artifacts/security/runtime-scan.json
       - name: Scan builder vulnerabilities and secrets
         id: builder_scan
@@ -121,7 +144,7 @@ jobs:
         env:
           TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
-          trivy image --input "$RUNNER_TEMP/runtime.tar" --format cyclonedx --output "$RUNNER_TEMP/runtime-sbom.cdx.json"
+          node scripts/release-integrity.mjs sbom-runtime "$(command -v trivy)" artifacts/security/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/security/runtime-scan-identity.json "$RUNNER_TEMP/runtime-sbom.cdx.json"
           node scripts/ci-security.mjs sbom "$RUNNER_TEMP/runtime-sbom.cdx.json" "$RUNNER_TEMP/runtime-raw.json" artifacts/security/runtime-sbom.cdx.json
       - name: Final security acceptance
         id: security
@@ -138,7 +161,8 @@ jobs:
           set -euo pipefail
           container="zevyrn-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          docker run -d --name "$container" --network none --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 128m --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 zevyrn-ci-runtime
+          image_id="$(jq -r .configDigest artifacts/security/identity.json)"
+          docker run -d --name "$container" --network none --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 128m --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 "$image_id"
           docker inspect "$container" > "$RUNNER_TEMP/runtime-container.json"
           node scripts/release-integrity.mjs container "$RUNNER_TEMP/runtime-container.json"
           for attempt in $(seq 1 60); do
@@ -150,12 +174,17 @@ jobs:
           docker exec "$container" nginx -t
           docker exec "$container" sh -ec 'test "$(id -u)" = 10001; test "$(stat -c %u:%g /usr/share/nginx/html/index.html)" = 10001:10001; test -r /usr/share/nginx/html/index.html; test -r /etc/nginx/nginx.conf; test -x /usr/share/nginx/html; ! test -w /etc/nginx/nginx.conf; ! test -w /usr/share/nginx/html; touch /tmp/zevyrn-write-probe; nginx -v; ! command -v node; ! command -v npm; ! test -d /app/node_modules'
           docker exec "$container" apk info -v nginx libxml2 libxpm zlib libexpat > artifacts/security/runtime-packages.txt
-          for spec in nginx=1.30.8-r1 libxml2=2.13.9-r3 libxpm=3.5.20-r0 zlib=1.4-r0 libexpat=2.10.0-r0; do
+          for spec in nginx=1.30.8-r1 libxml2=2.13.9-r3 libxpm=3.5.20-r0 zlib=1.4-r0 libexpat=2.10.0-r0 libx11=1.8.14-r0 brotli-libs=1.2.1-r0 curl=8.23.0-r0 libcurl=8.23.0-r0 libxslt=1.1.43-r4 musl-utils=1.2.6-r3; do
             installed="$(jq -r --arg name "${spec%%=*}" '[.components[] | select(.name == $name) | .version] | if length == 1 then .[0] else error("Missing or duplicate runtime package") end' artifacts/security/runtime-sbom.cdx.json)"
             test -n "$installed"
             comparison="$(docker exec "$container" apk version -t "$installed" "${spec#*=}")"
             [[ "$comparison" == '=' || "$comparison" == '>' ]]
           done
+          docker exec "$container" wget -S -O /dev/null http://127.0.0.1:8080/healthz > "$RUNNER_TEMP/headers.txt" 2>&1
+          for header in "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" 'X-Content-Type-Options: nosniff' 'Referrer-Policy: no-referrer' 'X-Frame-Options: DENY' 'Permissions-Policy: camera=(), microphone=(), geolocation=()' 'Cache-Control: no-store'; do grep -F "$header" "$RUNNER_TEMP/headers.txt"; done
+          docker stop --signal SIGQUIT --time 10 "$container"
+          test "$(docker inspect --format '{{.State.ExitCode}} {{.State.OOMKilled}}' "$container")" = '0 false'
+          node --input-type=module -e 'import {readFile,writeFile} from "node:fs/promises";const p="artifacts/security/",i=JSON.parse(await readFile(p+"identity.json"));await writeFile(p+"health.json",JSON.stringify({archiveSHA256:i.archiveSHA256,indexDigest:i.indexDigest,passed:true,checks:["image-config-and-rootfs","container-hardening","health","nginx-config","headers","assets","no-build-tools","graceful-stop"]},null,2)+"\n");'
       - name: Actionable sanitized security summary
         if: always()
         env:
@@ -166,17 +195,42 @@ jobs:
         if: always()
         with:
           name: security-evidence
-          path: artifacts/security/
+          path: |
+            artifacts/security/runtime-scan.json
+            artifacts/security/builder-scan.json
+            artifacts/security/scanner-version.json
+            artifacts/security/runtime-sbom.cdx.json
+            artifacts/security/npm-audit.json
+            artifacts/security/summary.md
+            artifacts/security/inspection.json
+            artifacts/security/image-identities.txt
+            artifacts/security/nginx-base-manifest.json
+            artifacts/security/runtime-packages.txt
+            artifacts/security/scan-start.txt
           retention-days: 7
           if-no-files-found: warn
+      - name: Verify complete non-promotable quality evidence
+        run: node scripts/release-integrity.mjs quality-record artifacts/security
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: packet
+        with:
+          name: quality-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/security/
+          retention-days: 7
+          if-no-files-found: error
 
   browser:
+    needs: quality-image
     runs-on: windows-2025
     timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.QUALITY_SOURCE }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.1'
@@ -185,20 +239,48 @@ jobs:
         run: |
           node --input-type=module -e "import {compilerPolicy} from './scripts/verify-compiler.mjs'; await compilerPolicy();"
           node --test tests/source-build-portability.mjs
-      - name: Locked browser tooling and application build
+      - name: Locked browser tooling and compiler integrity
         run: |
           npm ci --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run build
+          node scripts/verify-compiler.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Eight maintained Edge browser suites
+      - name: Authenticate exact same-run artifact before extraction
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.quality-image.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.quality-image.outputs.artifact_digest }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:ARTIFACT_DIGEST -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Missing quality artifact identity' }
+          $meta = Join-Path $env:RUNNER_TEMP 'quality-artifact.json'
+          $zip = Join-Path $env:RUNNER_TEMP 'quality-artifact.zip'
+          gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID" > $meta
+          if ($LASTEXITCODE -ne 0) { throw 'Quality artifact metadata unavailable' }
+          node scripts/release-integrity.mjs quality-artifact $meta $env:ARTIFACT_ID $env:ARTIFACT_DIGEST
+          if ($LASTEXITCODE -ne 0) { throw 'Quality artifact identity rejected' }
+          gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID/zip" > $zip
+          if ($LASTEXITCODE -ne 0) { throw 'Quality artifact download failed' }
+          node scripts/release-integrity.mjs quality-zip $zip $env:ARTIFACT_DIGEST packet
+          if ($LASTEXITCODE -ne 0) { throw 'Quality artifact checksum or ZIP entries rejected before extraction' }
+          node scripts/release-integrity.mjs quality-verify packet
+          if ($LASTEXITCODE -ne 0) { throw 'Quality evidence rejected' }
+      - name: Eight maintained Edge suites on retained image assets
         shell: pwsh
         run: |
+          Copy-Item -LiteralPath packet/assets -Destination dist -Recurse
           $env:KEYSMITH_BROWSER_PATH = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
           if (!(Test-Path -LiteralPath $env:KEYSMITH_BROWSER_PATH)) { throw 'Microsoft Edge is unavailable' }
           $env:KEYSMITH_PLAYWRIGHT_MODULE = Join-Path $PWD 'node_modules/playwright'
-          $suites = @('selection','keysmith','profiles','themes','contrast-regression','ui-corrections','focus-copy','regeneration')
-          foreach ($suite in $suites) {
-            node "tests/browser-$suite.mjs"
-            if ($LASTEXITCODE -ne 0) { throw "Browser suite failed: $suite" }
-          }
+          node scripts/release-integrity.mjs browser packet
+          if ($LASTEXITCODE -ne 0) { throw 'Archive-bound browser validation failed' }
+          node scripts/release-integrity.mjs quality-browser-result packet
+          if ($LASTEXITCODE -ne 0) { throw 'Browser result identity rejected' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: quality-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: packet/browser-results.json
+          retention-days: 7
+          if-no-files-found: warn
