@@ -205,12 +205,12 @@ test('release metadata agrees and historical dictionary provenance stays unchang
   assert.equal(pkg.name,'zevyrn');
   assert.equal(lock.name,pkg.name);
   assert.equal(lock.packages[''].name,pkg.name);
-  assert.equal(pkg.version,'1.2.2');
+  assert.equal(pkg.version,'1.2.3');
   assert.equal(lock.version,pkg.version);
   assert.equal(lock.packages[''].version,pkg.version);
   assert.match(await read('Dockerfile'),/org.opencontainers.image.title="Zevyrn"/);
-  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.2"/);
-  assert.match(await read('public/index.html'),/class="version">v1.2.2/);
+  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.3"/);
+  assert.match(await read('public/index.html'),/class="version">v1.2.3/);
   assert.equal(JSON.parse(await read('data/readability-overrides.json')).version,'0.4.0');
 });
 
@@ -232,7 +232,7 @@ test('all legacy installation and proxy entry points retain their v1.1.0 content
 
 function legacyEquivalent(config) {
   return config
-    .replaceAll('zevyrn:1.2.2-local','keysmith:1.0.0-local')
+    .replaceAll('zevyrn:1.2.3-local','keysmith:1.0.0-local')
     .replaceAll('${ZEVYRN_PORT:-${KEYSMITH_PORT:-18080}}','${KEYSMITH_PORT:-18080}')
     .replaceAll('${ZEVYRN_DOMAIN:-${KEYSMITH_DOMAIN:?Set ZEVYRN_DOMAIN or KEYSMITH_DOMAIN in .env}}','${KEYSMITH_DOMAIN:?Set KEYSMITH_DOMAIN in .env}')
     .replaceAll('${ZEVYRN_BIND_IP:-${KEYSMITH_BIND_IP:?Set ZEVYRN_BIND_IP or KEYSMITH_BIND_IP in .env}}','${KEYSMITH_BIND_IP:?Set KEYSMITH_BIND_IP in .env}')
@@ -248,7 +248,7 @@ test('native configurations preserve the complete legacy security and networking
     const native=await read('compose.zevyrn'+suffix+'.yaml');
     assert.equal(legacyEquivalent(native),await read('compose'+suffix+'.yaml'));
     assert.match(native,/^  zevyrn:$/m);
-    assert.match(native,/image: zevyrn:1\.2\.2-local/);
+    assert.match(native,/image: zevyrn:1\.2\.3-local/);
     assert.match(native,new RegExp('^name: zevyrn'+suffix.replace('.','-')+'$','m'));
     const app=native.split(/\n  (?:traefik|caddy):/)[0];
     assert.doesNotMatch(app,/cap_add:/);
@@ -347,7 +347,7 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
         const result=await render(file,settings);
         assert.ifError(result.error); assert.equal(result.status,0,result.stderr);
         const config=JSON.parse(result.stdout),app=config.services[service];
-        assert.equal(app.image,family==='native'?'zevyrn:1.2.2-local':'keysmith:1.0.0-local');
+        assert.equal(app.image,family==='native'?'zevyrn:1.2.3-local':'keysmith:1.0.0-local');
         assert.equal(app.user,'10001:10001'); assert.equal(app.read_only,true);
         assert.deepEqual(app.cap_drop,['ALL']); assert.ok(app.security_opt.includes('no-new-privileges:true'));
         if(suffix) {
@@ -392,6 +392,14 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
       const result=await render('compose.zevyrn.yaml',settings,shellValues);
       assert.equal(result.status,0,result.stderr); assert.equal(String(JSON.parse(result.stdout).services.zevyrn.ports[0].published),expected);
     }
+    const prebuilt=await render('compose.ghcr.yaml');
+    assert.equal(prebuilt.status,0,prebuilt.stderr);
+    const app=JSON.parse(prebuilt.stdout).services.zevyrn;
+    assert.equal(app.image,'ghcr.io/thestateofwhere/zevyrn:1.2.3');assert.equal(app.build,undefined);
+    assert.equal(app.user,'10001:10001');assert.equal(app.read_only,true);
+    const override='ghcr.io/thestateofwhere/zevyrn@sha256:'+'a'.repeat(64);
+    const selected=await render('compose.ghcr.yaml',{ZEVYRN_IMAGE:override});
+    assert.equal(selected.status,0,selected.stderr);assert.equal(JSON.parse(selected.stdout).services.zevyrn.image,override);
   } finally {
     // Only the exact directory allocated by mkdtemp can be removed.
     assert.equal(resolve(temporary),join(resolve(tmpdir()),temporary.split(/[\\/]/).at(-1)));

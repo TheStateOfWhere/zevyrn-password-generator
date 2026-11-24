@@ -1,15 +1,15 @@
-name: Publish qualified Zevyrn v1.2.2
+name: Publish qualified Zevyrn v1.2.3
 on:
   workflow_dispatch:
     inputs:
       qualification_run_id:
-        description: Successful exact-source v1.2.2 qualification run (within 24 hours)
+        description: Successful exact-source v1.2.3 qualification run (within 24 hours)
         required: true
         type: string
 permissions: {}
 concurrency:
   # One fixed publication lane; an absence check is not atomic tag immutability.
-  group: zevyrn-ghcr-v1.2.2-publication
+  group: zevyrn-ghcr-v1.2.3-publication
   cancel-in-progress: false
 jobs:
   validate:
@@ -37,10 +37,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = 'TheStateOfWhere/zevyrn-password-generator'
-          test "$GITHUB_REF" = refs/tags/v1.2.2
+          test "$GITHUB_REF" = refs/tags/v1.2.3
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           node scripts/release-integrity.mjs release-ref
-          test "$(node -p "require('./package.json').version")" = 1.2.2
+          test "$(node -p "require('./package.json').version")" = 1.2.3
           [[ "$QUALIFICATION_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
           mkdir -p validated
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN" > validated/run.json
@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends skopeo
-          skopeo copy --override-os linux --override-arch amd64 oci-archive:validated/packet/archive.oci.tar docker-daemon:zevyrn-promotion-scan:1.2.2
+          skopeo copy --override-os linux --override-arch amd64 oci-archive:validated/packet/archive.oci.tar docker-daemon:zevyrn-promotion-scan:1.2.3
           node scripts/release-integrity.mjs prepare-scan validated/packet/identity.json "$RUNNER_TEMP/runtime-scan.tar" validated/promotion-scan-identity.json
       - name: Verified scanner and fresh vulnerability database
         id: scanner
@@ -107,7 +107,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zevyrn-v1.2.2-validation-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: zevyrn-v1.2.3-validation-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             validated/promotion-runtime-scan.json
             validated/promotion-scanner-version.json
@@ -117,7 +117,7 @@ jobs:
           retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zevyrn-v1.2.2-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          name: zevyrn-v1.2.3-validated-${{ github.run_id }}-${{ github.run_attempt }}
           path: validated/
           if-no-files-found: error
           retention-days: 14
@@ -145,14 +145,14 @@ jobs:
           node-version: '24.22.1'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: zevyrn-v1.2.2-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          name: zevyrn-v1.2.3-validated-${{ github.run_id }}-${{ github.run_attempt }}
           path: validated
       - name: Revalidate source, qualification and exact bytes after owner approval
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = 'TheStateOfWhere/zevyrn-password-generator'
-          test "$GITHUB_REF" = refs/tags/v1.2.2
+          test "$GITHUB_REF" = refs/tags/v1.2.3
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           node scripts/release-integrity.mjs release-ref
           [[ "$QUALIFICATION_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
@@ -183,16 +183,16 @@ jobs:
           # The check and push are not atomic. No competing publisher is permitted.
           skopeo list-tags --authfile "$auth" "docker://$IMAGE" > "$RUNNER_TEMP/tags.json"
           node scripts/release-integrity.mjs tags "$RUNNER_TEMP/tags.json"
-          skopeo copy --all --preserve-digests --authfile "$auth" --digestfile validated/published-digest.txt oci-archive:validated/packet/archive.oci.tar "docker://$IMAGE:1.2.2"
+          skopeo copy --all --preserve-digests --authfile "$auth" --digestfile validated/published-digest.txt oci-archive:validated/packet/archive.oci.tar "docker://$IMAGE:1.2.3"
           test "$(cat validated/published-digest.txt)" = "$EXPECTED_INDEX"
-          skopeo inspect --no-creds --raw "docker://$IMAGE:1.2.2" > validated/public-index.json
+          skopeo inspect --no-creds --raw "docker://$IMAGE:1.2.3" > validated/public-index.json
           printf '%s  %s\n' "${EXPECTED_INDEX#sha256:}" validated/public-index.json | sha256sum --check --strict
           skopeo copy --all --preserve-digests --src-no-creds --digestfile validated/public-digest.txt "docker://$IMAGE@$EXPECTED_INDEX" "oci:$RUNNER_TEMP/public-verification:qualified"
           test "$(cat validated/public-digest.txt)" = "$EXPECTED_INDEX"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: zevyrn-v1.2.2-publication-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: zevyrn-v1.2.3-publication-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             validated/selection.json
             validated/packet/qualification.json

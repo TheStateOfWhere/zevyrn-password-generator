@@ -1,4 +1,4 @@
-name: Qualify Zevyrn v1.2.2 artifact
+name: Qualify Zevyrn v1.2.3 artifact
 on:
   pull_request:
     branches: [main]
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact approved main commit containing v1.2.2 metadata
+        description: Exact approved main commit containing v1.2.3 metadata
         required: true
         type: string
 permissions:
@@ -15,9 +15,9 @@ permissions:
 env:
   QUALIFICATION_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
   QUALIFICATION_KIND: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-  QUALIFICATION_PREFIX: ${{ github.event_name == 'pull_request' && 'zevyrn-v1.2.2-pr' || 'zevyrn-v1.2.2' }}
+  QUALIFICATION_PREFIX: ${{ github.event_name == 'pull_request' && 'zevyrn-v1.2.3-pr' || 'zevyrn-v1.2.3' }}
 concurrency:
-  group: zevyrn-v1.2.2-qualification-${{ github.event.pull_request.number || 'release' }}
+  group: zevyrn-v1.2.3-qualification-${{ github.event.pull_request.number || 'release' }}
   cancel-in-progress: false
 jobs:
   runtime:
@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           node scripts/release-integrity.mjs qualification-context
           test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE"
-          test "$(node -p "require('./package.json').version")" = 1.2.2
+          test "$(node -p "require('./package.json').version")" = 1.2.3
           printf 'started_at=%s\n' "$(date --utc --iso-8601=seconds)" >> "$GITHUB_OUTPUT"
       - name: Require matching successful source CI without a parallel-run race
         shell: bash
@@ -100,14 +100,14 @@ jobs:
           docker buildx version > "$RUNNER_TEMP/release-buildx.txt"
           docker buildx inspect --bootstrap > "$RUNNER_TEMP/release-buildkit.txt"
           docker inspect --format '{{.Image}}' "buildx_buildkit_zevyrn-release-${GITHUB_RUN_ID}0" > "$RUNNER_TEMP/release-buildkit-image.txt"
-          docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$QUALIFICATION_SOURCE" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag ghcr.io/thestateofwhere/zevyrn:1.2.2 --output type=oci,dest=artifacts/release/packet/archive.oci.tar --metadata-file artifacts/release/packet/build-metadata.json .
+          docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$QUALIFICATION_SOURCE" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag ghcr.io/thestateofwhere/zevyrn:1.2.3 --output type=oci,dest=artifacts/release/packet/archive.oci.tar --metadata-file artifacts/release/packet/build-metadata.json .
           node scripts/release-integrity.mjs inspect artifacts/release/packet/archive.oci.tar artifacts/release/packet/identity.json artifacts/release/diagnostics/inspection.json
           skopeo inspect --raw oci-archive:artifacts/release/packet/archive.oci.tar > "$RUNNER_TEMP/index.json"
           test "sha256:$(sha256sum "$RUNNER_TEMP/index.json" | cut -d ' ' -f 1)" = "$(jq -r .indexDigest artifacts/release/packet/identity.json)"
-          skopeo copy --override-os linux --override-arch amd64 oci-archive:artifacts/release/packet/archive.oci.tar docker-daemon:zevyrn-release-runtime:1.2.2
-          docker image inspect zevyrn-release-runtime:1.2.2 > "$RUNNER_TEMP/loaded.json"
+          skopeo copy --override-os linux --override-arch amd64 oci-archive:artifacts/release/packet/archive.oci.tar docker-daemon:zevyrn-release-runtime:1.2.3
+          docker image inspect zevyrn-release-runtime:1.2.3 > "$RUNNER_TEMP/loaded.json"
           node scripts/release-integrity.mjs loaded artifacts/release/packet/identity.json "$RUNNER_TEMP/loaded.json"
-          docker create --name zevyrn-release-assets zevyrn-release-runtime:1.2.2
+          docker create --name zevyrn-release-assets zevyrn-release-runtime:1.2.3
           mkdir artifacts/release/packet/assets
           docker cp zevyrn-release-assets:/usr/share/nginx/html/. artifacts/release/packet/assets/
           node scripts/release-integrity.mjs assets artifacts/release/packet dist
@@ -218,7 +218,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zevyrn-v1.2.2-failed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: zevyrn-v1.2.3-failed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/release/diagnostics/*.json
             artifacts/release/diagnostics/summary.md
