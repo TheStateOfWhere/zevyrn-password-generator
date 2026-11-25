@@ -86,13 +86,22 @@ a tag push. No dispatch input can change the activation lock or bypass approval.
 
 Successful main push and main manual quality runs retain a separate
 `quality-builder-RUN-ATTEMPT` artifact containing the exact scanned builder's
-OCI graph, identity and checksum inventory. Converting the already-built local
-image to OCI does not rebuild it: configuration and uncompressed layer digests
-are verified against the Docker-save archive used for scanning. Only successful
+OCI graph, identity and checksum inventory. The existing single main builder
+build exports that authoritative OCI directly. Its index, manifests, configuration
+and layers are verified before loading it into Docker; the loaded image ID and
+DiffIDs must match. The Docker-save scan archive is then derived from that exact
+image and verified against the original OCI. The retained OCI is never reconstructed
+from a separately serialized Docker image. PRs keep their existing builder-load
+path and do not retain a builder archive. This introduces no additional image
+build. Transport compression may differ, but configuration bytes and ordered
+uncompressed layer identities must match exactly. Only successful
 security, hardening and packet validation permit upload. Runtime quality evidence
 binds the builder artifact ID, ZIP digest and image identity through
 `builder-reference.json`. PRs and Windows do not download the builder archive;
 Windows receives only the small reference alongside the runtime packet.
+Builder identity failures retain a sanitized stage/category and, for configuration
+digest mismatches, only the expected and observed digests. Raw configuration,
+labels and environment values are not included in those diagnostics.
 
 For a future authorized tag release, the combined path:
 

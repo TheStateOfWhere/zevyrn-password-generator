@@ -88,7 +88,16 @@ jobs:
           sudo apt-get install --yes --no-install-recommends skopeo
           mkdir -p artifacts/security
           docker buildx create --name "zevyrn-quality-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --driver docker-container --use
-          docker buildx build --platform linux/amd64 --target build --load -t zevyrn-ci-builder .
+          if [[ "$GITHUB_REF" == refs/heads/main && ( "$GITHUB_EVENT_NAME" == push || "$GITHUB_EVENT_NAME" == workflow_dispatch ) ]]; then
+            mkdir -p "$RUNNER_TEMP/retained-builder"
+            docker buildx build --platform linux/amd64 --target build --provenance=false --output "type=oci,dest=$RUNNER_TEMP/retained-builder/builder.oci.tar" .
+            node scripts/release-integrity.mjs inspect-builder "$RUNNER_TEMP/retained-builder/builder.oci.tar" "$RUNNER_TEMP/retained-builder/builder-identity.json" artifacts/security/builder-inspection.json
+            skopeo copy --override-os linux --override-arch amd64 "oci-archive:$RUNNER_TEMP/retained-builder/builder.oci.tar" docker-daemon:zevyrn-ci-builder:latest
+            docker image inspect zevyrn-ci-builder > "$RUNNER_TEMP/builder-loaded.json"
+            node scripts/release-integrity.mjs builder-loaded "$RUNNER_TEMP/retained-builder/builder-identity.json" "$RUNNER_TEMP/builder-loaded.json" artifacts/security/builder-inspection.json
+          else
+            docker buildx build --platform linux/amd64 --target build --load -t zevyrn-ci-builder .
+          fi
           docker buildx build --platform linux/amd64 --provenance=mode=min --label "org.opencontainers.image.revision=$QUALITY_SOURCE" --label org.opencontainers.image.source=https://github.com/TheStateOfWhere/zevyrn-password-generator --tag zevyrn-ci-runtime --output type=oci,dest=artifacts/security/archive.oci.tar --metadata-file artifacts/security/build-metadata.json .
           node scripts/release-integrity.mjs inspect artifacts/security/archive.oci.tar artifacts/security/identity.json artifacts/security/inspection.json
           skopeo copy --override-os linux --override-arch amd64 oci-archive:artifacts/security/archive.oci.tar docker-daemon:zevyrn-ci-runtime:latest
@@ -112,9 +121,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/retained-builder"
-          skopeo copy --override-os linux --override-arch amd64 docker-daemon:zevyrn-ci-builder:latest "oci-archive:$RUNNER_TEMP/retained-builder/builder.oci.tar"
-          node scripts/release-integrity.mjs retain-builder "$RUNNER_TEMP/retained-builder/builder.oci.tar" "$RUNNER_TEMP/builder.tar" "$RUNNER_TEMP/retained-builder"
+          node scripts/release-integrity.mjs retain-builder "$RUNNER_TEMP/retained-builder/builder.oci.tar" "$RUNNER_TEMP/builder.tar" "$RUNNER_TEMP/retained-builder" artifacts/security/builder-inspection.json
       - name: Prepare image-bound runtime scan archive
         id: scan_archive
         run: node scripts/release-integrity.mjs prepare-scan artifacts/security/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/security/runtime-scan-identity.json
@@ -147,7 +154,7 @@ jobs:
           trivy image --input "$RUNNER_TEMP/builder.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/builder-raw.json"
           node scripts/ci-security.mjs report builder "$RUNNER_TEMP/builder-raw.json" artifacts/security/builder-scan.json
           if test -f "$RUNNER_TEMP/retained-builder/builder-identity.json"; then
-            node scripts/release-integrity.mjs builder-scan-binding "$RUNNER_TEMP/retained-builder/builder-identity.json" "$RUNNER_TEMP/builder.tar" "$RUNNER_TEMP/builder-raw.json"
+            node scripts/release-integrity.mjs builder-scan-binding "$RUNNER_TEMP/retained-builder/builder-identity.json" "$RUNNER_TEMP/builder.tar" "$RUNNER_TEMP/builder-raw.json" artifacts/security/builder-inspection.json
           fi
       - name: Generate and validate runtime SBOM
         id: sbom
@@ -214,6 +221,7 @@ jobs:
             artifacts/security/npm-audit.json
             artifacts/security/summary.md
             artifacts/security/inspection.json
+            artifacts/security/builder-inspection.json
             artifacts/security/image-identities.txt
             artifacts/security/nginx-base-manifest.json
             artifacts/security/runtime-packages.txt
