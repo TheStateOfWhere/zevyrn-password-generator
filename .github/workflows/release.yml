@@ -1,0 +1,286 @@
+name: Release qualification and publication
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Verify on main, or explicitly recover a release from its exact tag (activation locked)
+        required: true
+        default: verify
+        type: choice
+        options: [verify, release]
+      quality_run_id:
+        description: Exact successful main quality run; no automatic substitution
+        required: true
+        type: string
+
+permissions: {}
+env:
+  # Migration lock. Changing this literal requires separately reviewed authorization.
+  # Repository variables and dispatch inputs cannot enable publication.
+  LIVE_PUBLICATION_ENABLED: 'false'
+  RELEASE_OPERATION: ${{ inputs.operation || 'release' }}
+concurrency:
+  # Share the existing maintenance publisher's version lane during migration.
+  group: zevyrn-ghcr-${{ github.ref_name }}-publication
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      publish: ${{ steps.select.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: Resolve trusted source and exact upstream run
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALITY_RUN_ID: ${{ inputs.quality_run_id }}
+        run: node scripts/release-integrity.mjs combined-resolve selection.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: selection.json
+          if-no-files-found: error
+          retention-days: 7
+
+  qualify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.packet.outputs.artifact-id }}
+      artifact_digest: sha256:${{ steps.packet.outputs.artifact-digest }}
+      index_digest: ${{ steps.seal.outputs.index_digest }}
+      config_digest: ${{ steps.seal.outputs.config_digest }}
+    env:
+      TRIVY_DISABLE_TELEMETRY: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: Locked integrity tooling
+        run: npm ci --no-audit --no-fund
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: selection
+      - name: Independently re-resolve selection and authenticate upstream archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALITY_RUN_ID: ${{ inputs.quality_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-integrity.mjs combined-resolve current-selection.json
+          cmp selection/selection.json current-selection.json
+          node scripts/release-integrity.mjs combined-fetch current-selection.json qualified
+      - name: Load exact retained images for scanning without building
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          skopeo copy --override-os linux --override-arch amd64 oci-archive:qualified/runtime/archive.oci.tar docker-daemon:zevyrn-release-runtime:scan
+          skopeo copy --override-os linux --override-arch amd64 oci-archive:qualified/builder/builder.oci.tar docker-daemon:zevyrn-release-builder:scan
+          node scripts/release-integrity.mjs prepare-scan qualified/runtime/identity.json "$RUNNER_TEMP/runtime-scan.tar" qualified/release-scan-identity.json
+          docker save -o "$RUNNER_TEMP/builder-scan.tar" "$(jq -r .configDigest qualified/builder/builder-identity.json)"
+      - name: Verified scanner and fresh database
+        id: scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz --output "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+          "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --download-db-only
+          "$RUNNER_TEMP/trivy" --cache-dir "$RUNNER_TEMP/trivy-cache" version --format json > qualified/scanner-version.json
+      - name: Fresh runtime vulnerability and file/configuration secret scan
+        id: runtime_scan
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          node scripts/release-integrity.mjs scan-runtime "$RUNNER_TEMP/trivy" qualified/runtime/identity.json "$RUNNER_TEMP/runtime-scan.tar" qualified/release-scan-identity.json "$RUNNER_TEMP/runtime-raw.json"
+          node scripts/ci-security.mjs report runtime "$RUNNER_TEMP/runtime-raw.json" qualified/runtime-scan.json
+      - name: Fresh builder vulnerability and file/configuration secret scan
+        id: builder_scan
+        if: ${{ !cancelled() && steps.scanner.outcome == 'success' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          node scripts/release-integrity.mjs scan-builder "$RUNNER_TEMP/trivy" qualified/builder/builder-identity.json "$RUNNER_TEMP/builder-scan.tar" "$RUNNER_TEMP/builder-raw.json"
+          node scripts/ci-security.mjs report builder "$RUNNER_TEMP/builder-raw.json" qualified/builder-scan.json
+      - name: Final security acceptance
+        id: security
+        if: ${{ !cancelled() && steps.scanner.outcome == 'success' }}
+        run: |
+          test '${{ steps.runtime_scan.outcome }}' = success
+          test '${{ steps.builder_scan.outcome }}' = success
+          node scripts/ci-security.mjs trivy "$RUNNER_TEMP/runtime-raw.json" qualified/runtime-scan.json "$RUNNER_TEMP/builder-raw.json" qualified/builder-scan.json
+      - name: Sanitized security summary
+        if: always()
+        env:
+          SECURITY_STAGES: >-
+            {"scanner":"${{ steps.scanner.outcome }}","runtimeScan":"${{ steps.runtime_scan.outcome }}","builderScan":"${{ steps.builder_scan.outcome }}","security":"${{ steps.security.outcome }}"}
+        run: node scripts/ci-security.mjs summary qualified "$SECURITY_STAGES"
+      - name: Preserve sanitized diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            qualified/runtime-scan.json
+            qualified/builder-scan.json
+            qualified/scanner-version.json
+            qualified/release-scan-identity.json
+            qualified/summary.md
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Seal separate release or read-only verification record
+        id: seal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-integrity.mjs combined-seal qualified
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: packet
+        with:
+          name: release-qualified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qualified/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [resolve, qualify]
+    # Immutable migration gate; enabling requires a separately reviewed source change.
+    # Verification dispatch can never enter this environment, even after activation.
+    if: ${{ false && startsWith(github.ref, 'refs/tags/v') && needs.resolve.outputs.publish == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'release')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: zevyrn-ghcr-publication
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/thestateofwhere/zevyrn
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: Locked integrity tooling from reviewed source
+        run: npm ci --no-audit --no-fund
+      - name: Authenticate current-run packet and revalidate after owner approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.qualify.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.qualify.outputs.artifact_digest }}
+        run: node scripts/release-integrity.mjs combined-download qualified "$ARTIFACT_ID" "$ARTIFACT_DIGEST"
+      - name: Publish immutable qualified graph
+        id: promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_INDEX: ${{ needs.qualify.outputs.index_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          # Recheck immediately before registry access, including time spent installing tools.
+          node scripts/release-integrity.mjs combined-revalidate qualified
+          image_version="$(node -p "require('./package.json').version")"
+          umask 077
+          auth="$RUNNER_TEMP/release-registry-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo list-tags --authfile "$auth" "docker://$IMAGE" > "$RUNNER_TEMP/tags.json"
+          node scripts/release-integrity.mjs tags "$RUNNER_TEMP/tags.json"
+          skopeo inspect --raw oci-archive:qualified/runtime/archive.oci.tar > "$RUNNER_TEMP/index.json"
+          printf '%s  %s\n' "${EXPECTED_INDEX#sha256:}" "$RUNNER_TEMP/index.json" | sha256sum --check --strict
+          skopeo copy --all --preserve-digests --authfile "$auth" --digestfile qualified/published-digest.txt oci-archive:qualified/runtime/archive.oci.tar "docker://$IMAGE:$image_version"
+          test "$(cat qualified/published-digest.txt)" = "$EXPECTED_INDEX"
+          printf 'Publication completed. Anonymous consumer verification is reported separately.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Report publication outcome separately
+        if: always()
+        env:
+          PUBLICATION_RESULT: ${{ steps.promotion.outcome }}
+        run: printf 'Publication stage outcome=%s. Retain any published digest even if later verification fails; no automatic republish.\n' "$PUBLICATION_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: release-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            qualified/release.json
+            qualified/published-digest.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  consumer:
+    needs: [qualify, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    env:
+      IMAGE: ghcr.io/thestateofwhere/zevyrn
+      EXPECTED_INDEX: ${{ needs.qualify.outputs.index_digest }}
+      EXPECTED_CONFIG: ${{ needs.qualify.outputs.config_digest }}
+    steps:
+      - name: Actual anonymous Docker Engine pulls on a separate runner
+        id: pulls
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          export DOCKER_CONFIG="$(mktemp -d "$RUNNER_TEMP/anonymous-docker.XXXXXX")"
+          printf '{}\n' > "$DOCKER_CONFIG/config.json"
+          unset DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE GH_TOKEN GITHUB_TOKEN
+          docker version > evidence/docker-version.txt
+          image_version="${GITHUB_REF_NAME#v}"
+          printf 'docker pull --platform linux/amd64 %s:%s\ndocker pull --platform linux/amd64 %s@%s\n' "$IMAGE" "$image_version" "$IMAGE" "$EXPECTED_INDEX" > evidence/commands.txt
+          tag_status=0
+          docker pull --platform linux/amd64 "$IMAGE:$image_version" > evidence/tag-pull.txt 2>&1 || tag_status=$?
+          digest_status=0
+          docker pull --platform linux/amd64 "$IMAGE@$EXPECTED_INDEX" > evidence/digest-pull.txt 2>&1 || digest_status=$?
+          printf '{"tagExitCode":%s,"digestExitCode":%s}\n' "$tag_status" "$digest_status" > evidence/exit-codes.json
+          test "$tag_status" = 0
+          test "$digest_status" = 0
+          docker image inspect "$IMAGE:$image_version" > evidence/tag-image.json
+          docker image inspect "$IMAGE@$EXPECTED_INDEX" > evidence/digest-image.json
+          for file in evidence/tag-image.json evidence/digest-image.json; do
+            jq --exit-status --arg config "$EXPECTED_CONFIG" --arg index "$IMAGE@$EXPECTED_INDEX" --arg source "$GITHUB_SHA" --arg version "$image_version" 'length == 1 and .[0].Id == $config and .[0].Os == "linux" and .[0].Architecture == "amd64" and (.[0].RepoDigests | index($index)) != null and .[0].Config.Labels["org.opencontainers.image.version"] == $version and .[0].Config.Labels["org.opencontainers.image.revision"] == $source and .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/TheStateOfWhere/zevyrn-password-generator"' "$file"
+          done
+          printf 'Anonymous tag and digest Docker pulls passed.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Report consumer verification outcome separately
+        if: always()
+        env:
+          CONSUMER_RESULT: ${{ steps.pulls.outcome }}
+        run: printf 'Consumer verification outcome=%s. Publication remains a separate completed stage; this job never republishes.\n' "$CONSUMER_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: release-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14

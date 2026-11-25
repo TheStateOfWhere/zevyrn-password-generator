@@ -3,11 +3,11 @@ import {gzipSync} from 'node:zlib';
 import {Readable} from 'node:stream';
 import {createRequire} from 'node:module';
 import {spawnSync} from 'node:child_process';
-import {mkdtempSync,writeFileSync,readFileSync,existsSync,mkdirSync,renameSync,symlinkSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync,existsSync,mkdirSync,renameSync,symlinkSync,cpSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {qualityIdentity,validateQualityArtifact,validateQualityRecord,validateQualitySecurity,validateQualityBrowser,inspectArchive} from '../scripts/release-integrity.mjs';
+import {qualityIdentity,validateQualityArtifact,validateQualityRecord,validateQualitySecurity,validateQualityBrowser,inspectArchive,qualityZip,releaseFreshness,combinedEntry,selectQualityRun,authenticateMainQuality,inspectBuilderGraph,inspectBuilderArchive,validateBuilderBinding,validateCombinedPhase,validateReleaseReceipt,validateVersionCollision,authenticatePackets,combinedSecurity,snapshot} from '../scripts/release-integrity.mjs';
 import {hash,inspectDockerGraph,inspectDockerArchive,validateScanIdentity,validateRuntimeReportIdentity,validateSBOMIdentity,validateCompleteScanEvidence,runtimeScanArgs,sanitizedFailureStages,sanitizedScannerMetadata,sanitizedScanSummary,assetSnapshot,validateRuntimeAssets,verifyRetainedAssets,nginxAssetSHA256,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
@@ -185,6 +185,145 @@ test('release acceptance allows zero through three exact authorized remaining HI
 test('qualification evidence rejects mismatched archives, source, assets, failed browser/runtime, missing SBOM and unsafe scans',()=>{for(const change of [f=>f.evidence.browser.archiveSHA256='e'.repeat(64),f=>f.evidence.browser.sourceTree='e'.repeat(40),f=>f.evidence.browser.assetsSHA256='e'.repeat(64),f=>f.evidence.browser.suites[0].conclusion='failure',f=>f.evidence.browser.suites.pop(),f=>f.evidence.health.passed=false,f=>f.evidence.health.checks.pop(),f=>f.evidence.runtime.blocked=true,f=>f.evidence.builder.secrets=1,f=>f.evidence.builder.unapprovedHighCount=1,f=>f.evidence.builderIdentity.sourceCommit=tree,f=>f.context.startedAt=null,f=>f.evidence.runtime.results=[{vulnerabilities:[{id:'CVE-2026-107891',severity:'MEDIUM'}]}],f=>delete f.evidence.sbom,f=>delete f.evidence.scanner.VulnerabilityDB,f=>f.evidence.scanner.Version='other',f=>f.evidence.scanner.VulnerabilityDB.DownloadedAt=new Date(now-86400000).toISOString()]){const f=evidenceFixture();change(f);assert.throws(()=>evidenceCheck(f));}});
 test('derived Docker image must preserve exact rootfs and execution configuration',()=>{const identity={sourceCommit:source,configDigest:sha,config:config(),diffIDs:[sha]},image={Id:sha,Os:'linux',Architecture:'amd64',Config:clone(identity.config.config),RootFS:{Layers:[sha]}};verifyLoaded(identity,image);for(const change of [i=>i.RootFS.Layers=[sha256Other()],i=>i.Config.Env.push('UNEXPECTED=1'),i=>i.Config.User='0']){const i=clone(image);change(i);assert.throws(()=>verifyLoaded(identity,i));}});
 function sha256Other(){return 'sha256:'+'d'.repeat(64);}
+function mainReleaseFixture(){
+  const f=runFixture();Object.assign(f.run,{path:'.github/workflows/quality-security.yml',event:'push',workflow_id:71});f.run.head_repository.full_name=repository;
+  f.jobs={total_count:2,jobs:['quality-image','browser'].map((name,id)=>({id,name,run_id:42,run_attempt:2,status:'completed',conclusion:'success'}))};
+  f.artifacts={total_count:3,artifacts:['runtime','builder','browser'].map((role,index)=>({...clone(f.artifacts.artifacts[0]),id:9+index,name:`quality-${role}-42-2`}))};
+  f.workflow={id:71,path:'.github/workflows/quality-security.yml',state:'active'};f.sourceInfo={sha:source,tree:{sha:tree}};
+  f.check=(refresh=false)=>authenticateMainQuality(f.run,f.jobs,f.artifacts,f.workflow,f.sourceInfo,source,now,refresh);return f;
+}
+function releaseEntryFixture(){
+  return {GITHUB_REPOSITORY:repository,GITHUB_SHA:source,GITHUB_WORKFLOW_SHA:source,GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/release.yml@refs/heads/main`,GITHUB_RUN_ID:'90',GITHUB_RUN_ATTEMPT:'1',LIVE_PUBLICATION_ENABLED:'false'};
+}
+test('combined release authenticates exact main workflow/source/tree/run/attempt and all three artifact identities',()=>{
+  const f=mainReleaseFixture(),selected=f.check();assert.equal(selected.sourceTree,tree);assert.equal(selected.workflowRevision,source);assert.equal(selected.artifacts.builder.id,10);
+  for(const change of [x=>x.run.repository.id++,x=>x.run.repository.full_name='other/repo',x=>x.run.head_repository.id++,x=>x.run.head_repository.full_name='other/repo',x=>x.run.path='.github/workflows/other.yml',x=>x.run.workflow_id++,x=>x.workflow.state='disabled_manually',x=>x.sourceInfo.sha=tree,x=>x.sourceInfo.tree.sha='bad',x=>x.run.head_sha=tree,x=>x.run.head_branch='feature',x=>x.run.event='pull_request',x=>x.run.event='schedule',x=>x.run.status='in_progress',x=>x.run.conclusion='failure',x=>x.run.run_attempt++,x=>x.run.run_started_at=new Date(now-86400001).toISOString()]){
+    const x=mainReleaseFixture();change(x);assert.throws(()=>x.check());
+  }
+});
+test('main artifact selection rejects missing builder, duplicate identities, stale attempts, substituted IDs and expired coverage',()=>{
+  const changes=[x=>x.artifacts.artifacts.splice(1,1),x=>x.artifacts.artifacts[1].id=9,x=>x.artifacts.artifacts[1].id=null,x=>x.artifacts.artifacts[1].name='quality-builder-42-1',x=>x.artifacts.artifacts[1].expired=true,x=>x.artifacts.artifacts[1].digest='bad',x=>x.artifacts.artifacts[1].workflow_run.id++,x=>x.artifacts.artifacts[1].workflow_run.head_sha=tree,x=>x.artifacts.artifacts[1].workflow_run.repository_id++,x=>x.artifacts.artifacts[1].workflow_run.head_repository_id++,x=>x.artifacts.artifacts[1].created_at=new Date(now-3600000).toISOString(),x=>x.artifacts.artifacts.push(clone(x.artifacts.artifacts[1]))];
+  for(const change of changes){const x=mainReleaseFixture();change(x);x.artifacts.total_count=x.artifacts.artifacts.length;assert.throws(()=>x.check());}
+});
+test('main evidence rejects failed/cancelled/skipped/incomplete jobs, including previous attempts',()=>{
+  for(const name of ['quality-image','browser'])for(const change of [j=>j.status='in_progress',j=>j.conclusion='failure',j=>j.conclusion='cancelled',j=>j.conclusion='skipped',j=>j.run_attempt--,j=>j.run_id--]){
+    const x=mainReleaseFixture();change(x.jobs.jobs.find(j=>j.name===name));assert.throws(()=>x.check());
+  }
+  const queued=mainReleaseFixture();queued.run.created_at=new Date(now-86400001).toISOString();assert.throws(()=>queued.check(),/expired/);
+});
+test('explicit main manual quality refresh requires separate successful push-CI validation and never accepts a side branch',()=>{
+  const f=mainReleaseFixture();f.run.event='workflow_dispatch';assert.throws(()=>f.check());assert.equal(f.check(true).event,'workflow_dispatch');
+  // The unchanged push prerequisite rejects dispatch, and selectUpstream applies it separately.
+  assert.throws(()=>validateQuality(f.run,f.jobs,source));f.run.head_branch='feature';assert.throws(()=>f.check(true));
+});
+test('run resolution pins newest exact-source main push run without falling back past a newer failure',()=>{
+  const f=mainReleaseFixture(),older={...f.run,id:41,created_at:new Date(now-1200000).toISOString()},latest={...f.run,conclusion:'failure'};
+  const runs={total_count:2,workflow_runs:[older,latest]};assert.equal(selectQualityRun(runs,source),42);
+  assert.throws(()=>authenticateMainQuality(latest,f.jobs,f.artifacts,f.workflow,f.sourceInfo,source,now));
+  assert.throws(()=>selectQualityRun({...runs,total_count:101},source));assert.throws(()=>selectQualityRun(runs,tree));
+});
+test('read-only dispatch cannot request publication; tag publication requires the literal migration activation',()=>{
+  const env=releaseEntryFixture();assert.equal(combinedEntry(env,source,tree,true).publish,false);
+  assert.equal(combinedEntry({...env,LIVE_PUBLICATION_ENABLED:'true'},source,tree,true).publish,false);
+  const tag={...env,GITHUB_EVENT_NAME:'push',GITHUB_REF:'refs/tags/v1.2.3',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/release.yml@refs/tags/v1.2.3`};
+  assert.throws(()=>combinedEntry(tag,source,tree,true),/disabled/);assert.equal(combinedEntry({...tag,LIVE_PUBLICATION_ENABLED:'true'},source,tree,true).publish,true);
+  const recovery={...tag,GITHUB_EVENT_NAME:'workflow_dispatch',RELEASE_OPERATION:'release'};
+  assert.throws(()=>combinedEntry(recovery,source,tree,true),/disabled/);
+  assert.equal(combinedEntry({...recovery,LIVE_PUBLICATION_ENABLED:'true'},source,tree,true).publish,true);
+  assert.throws(()=>combinedEntry({...recovery,RELEASE_OPERATION:'verify',LIVE_PUBLICATION_ENABLED:'true'},source,tree,true));
+  assert.throws(()=>combinedEntry({...env,RELEASE_OPERATION:'release',LIVE_PUBLICATION_ENABLED:'true'},source,tree,true));
+  for(const changes of [{GITHUB_REPOSITORY:'other/repo'},{GITHUB_WORKFLOW_SHA:tree},{GITHUB_SHA:tree},{GITHUB_WORKFLOW_REF:env.GITHUB_WORKFLOW_REF.replace('release.yml','other.yml')},{GITHUB_EVENT_NAME:'pull_request'},{GITHUB_REF:'refs/heads/feature'},{GITHUB_RUN_ATTEMPT:'0'}])assert.throws(()=>combinedEntry({...env,...changes},source,tree,true));
+  assert.throws(()=>combinedEntry(env,source,tree,false));assert.throws(()=>combinedEntry(env,source,'bad',true));
+});
+test('release freshness never resets main evidence age and expires during owner approval',()=>{
+  const scanner=evidenceFixture().evidence.scanner,start=new Date(now-600000).toISOString();releaseFreshness(start,scanner,now,true);
+  assert.throws(()=>releaseFreshness(new Date(now-86400001).toISOString(),scanner,now),/expired/);
+  assert.throws(()=>releaseFreshness(start,scanner,now+3600001,true),/freshness/);
+  for(const change of [s=>s.VulnerabilityDB.DownloadedAt=new Date(now-1200000).toISOString(),s=>s.VulnerabilityDB.NextUpdate=new Date(now).toISOString(),s=>s.VulnerabilityDB.UpdatedAt=new Date(now+3600000).toISOString(),s=>s.Version='new']){
+    const s=clone(scanner);change(s);assert.throws(()=>releaseFreshness(start,s,now));
+  }
+});
+test('combined in-progress run accepts only successful read-only jobs from its own current attempt',()=>{
+  const entry={...combinedEntry(releaseEntryFixture(),source,tree,true),workflowId:81},info={...mainReleaseFixture().run,id:90,run_attempt:1,path:'.github/workflows/release.yml',workflow_id:81,event:'workflow_dispatch',status:'in_progress',conclusion:null};
+  const jobs={total_count:2,jobs:['resolve','qualify'].map(name=>({name,run_id:90,run_attempt:1,status:'completed',conclusion:'success'}))};
+  validateCombinedPhase(info,jobs,entry);
+  for(const event of ['push','workflow_dispatch']){
+    const live={...entry,publish:true,event,operation:'release',ref:'refs/tags/v1.2.3'};
+    validateCombinedPhase({...info,event,head_branch:'v1.2.3'},jobs,live);
+  }
+  for(const outcome of ['failure','cancelled','skipped',null])for(const name of ['resolve','qualify']){const j=clone(jobs);j.jobs.find(j=>j.name===name).conclusion=outcome;assert.throws(()=>validateCombinedPhase(info,j,entry));}
+  for(const change of [j=>j.jobs.pop(),j=>j.jobs[1].run_attempt++,j=>j.jobs[1].run_id++,j=>j.jobs[1].name='publish']){const j=clone(jobs);change(j);j.total_count=j.jobs.length;assert.throws(()=>validateCombinedPhase(info,j,entry));}
+  for(const change of [r=>r.run_attempt++,r=>r.workflow_id++,r=>r.head_sha=tree,r=>r.conclusion='cancelled']){const r=clone(info);change(r);assert.throws(()=>validateCombinedPhase(r,jobs,entry));}
+});
+test('separate verification receipt cannot relabel original quality evidence or become promotable',()=>{
+  const selection=mainReleaseFixture().check(),entry={...combinedEntry(releaseEntryFixture(),source,tree,true),startedAt:new Date(now-100000).toISOString()},identity=evidenceFixture().identity,files={'runtime/quality.json':'a'.repeat(64)},scanner=evidenceFixture().evidence.scanner;
+  const receipt={schemaVersion:1,version:'1.2.3',purpose:'verification',promotionEligible:false,entry,upstream:selection,qualifiedAt:now,archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,files};
+  validateReleaseReceipt(receipt,entry,selection,identity,files,scanner,now);
+  for(const change of [r=>r.promotionEligible=true,r=>r.purpose='release',r=>r.upstream.sourceTree=source,r=>r.upstream.workflowRevision=tree,r=>r.upstream.artifacts.builder.id++,r=>r.archiveSHA256='f'.repeat(64),r=>r.indexDigest=sha256Other(),r=>r.files['runtime/quality.json']='e'.repeat(64),r=>r.entry.runAttempt++]){
+    const r=clone(receipt);change(r);assert.throws(()=>validateReleaseReceipt(r,entry,selection,identity,files,scanner,now));
+  }
+  const oldSelection={...selection,createdAt:new Date(now-86400001).toISOString()};assert.throws(()=>validateReleaseReceipt({...receipt,upstream:oldSelection},entry,oldSelection,identity,files,scanner,now),/expired/);
+  const live={...combinedEntry({...releaseEntryFixture(),GITHUB_REF:'refs/tags/v1.2.3',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/release.yml@refs/tags/v1.2.3`,RELEASE_OPERATION:'release',LIVE_PUBLICATION_ENABLED:'true'},source,tree,true),startedAt:entry.startedAt},release={...receipt,purpose:'release',promotionEligible:true,entry:live};validateReleaseReceipt(release,live,selection,identity,files,scanner,now);
+  assert.throws(()=>validateReleaseReceipt(release,live,selection,identity,files,scanner,now+86400001));
+});
+test('builder reference binds config, OCI/archive, source/tree, run/attempt and exact artifact ID/checksum',()=>{
+  const selection=mainReleaseFixture().check(),identity={sourceCommit:source,sourceTree:tree,runId:42,runAttempt:2,configDigest:sha,indexDigest:sha,archiveSHA256:'c'.repeat(64)},reference={identity:clone(identity),artifact:clone(selection.artifacts.builder)},summary={imageID:sha};
+  validateBuilderBinding(identity,reference,selection,summary);
+  for(const change of [r=>r.artifact.id++,r=>r.artifact.digest=sha256Other(),r=>r.identity.archiveSHA256='e'.repeat(64),r=>r.identity.configDigest=sha256Other()]){const r=clone(reference);change(r);assert.throws(()=>validateBuilderBinding(identity,r,selection,summary));}
+  for(const change of [i=>i.sourceCommit=tree,i=>i.sourceTree=source,i=>i.runId++,i=>i.runAttempt++]){const i=clone(identity);change(i);assert.throws(()=>validateBuilderBinding(i,{...reference,identity:i},selection,summary));}
+  assert.throws(()=>validateBuilderBinding(identity,reference,selection,{imageID:sha256Other()}));
+});
+test('existing version collision always stops, including when a different digest might replace it',()=>{
+  validateVersionCollision({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.2']});
+  assert.throws(()=>validateVersionCollision({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.3']}),/already exists/);
+});
+function builderGraphFixture(change=()=>{}){
+  const layer=Buffer.from('builder filesystem fixture'),c={os:'linux',architecture:'amd64',config:{User:'',Env:['NODE_VERSION=24.22.1']},rootfs:{type:'layers',diff_ids:['sha256:'+hash(layer)]}};change(c);
+  const members=new Map(),store=(bytes,mediaType)=>{bytes=Buffer.isBuffer(bytes)?bytes:Buffer.from(JSON.stringify(bytes));const descriptor={mediaType,digest:'sha256:'+hash(bytes),size:bytes.length};members.set('blobs/sha256/'+descriptor.digest.slice(7),bytes);return descriptor;};
+  const m={schemaVersion:2,mediaType:mt,config:store(c,ct),layers:[store(gzipSync(layer),'application/vnd.oci.image.layer.v1.tar+gzip')]};
+  members.set('index.json',Buffer.from(JSON.stringify({schemaVersion:2,manifests:[store(m,mt)]})));members.set('oci-layout',Buffer.from('{"imageLayoutVersion":"1.0.0"}'));
+  return {members,config:c,layer,check:()=>inspectBuilderGraph(name=>members.get(name),[...members.keys()])};
+}
+test('builder OCI verification authenticates actual config and decompressed layers without relaxing runtime rules',()=>{
+  const f=builderGraphFixture(),identity=f.check();assert.equal(identity.config.config.User,'');assert.throws(()=>validateConfig(identity.config,source));
+  for(const change of [c=>c.architecture='arm64',c=>c.os='windows',c=>c.rootfs.diff_ids=[sha]])assert.throws(()=>builderGraphFixture(change).check());
+  const corrupt=builderGraphFixture();corrupt.members.set('blobs/sha256/'+corrupt.check().configDigest.slice(7),Buffer.from('{}'));assert.throws(corrupt.check);
+  const orphan=builderGraphFixture();orphan.members.set('blobs/sha256/'+'f'.repeat(64),Buffer.from('extra'));assert.throws(orphan.check);
+});
+test('main builder retention command verifies actual OCI against the exact original scanned Docker-save bytes',{skip:!existsSync('.github/workflows/quality-security.yml')&&'Requires a Git source checkout'},async()=>{
+  const root=mkdtempSync(join(tmpdir(),'zevyrn-retain-builder-')),members=join(root,'members'),retained=join(root,'retained'),docker=join(root,'docker');for(const dir of [members,retained,docker])mkdirSync(dir);
+  const f=builderGraphFixture();for(const [name,bytes] of f.members){const path=join(members,name);mkdirSync(join(path,'..'),{recursive:true});writeFileSync(path,bytes);}
+  const archive=join(retained,'builder.oci.tar'),scan=join(root,'scan.tar');assert.equal(spawnSync('tar',['-cf',archive,'-C',members,...f.members.keys()],{encoding:'utf8'}).status,0);
+  writeFileSync(join(docker,'config.json'),JSON.stringify(f.config));writeFileSync(join(docker,'layer.tar'),f.layer);writeFileSync(join(docker,'manifest.json'),JSON.stringify([{Config:'config.json',Layers:['layer.tar'],RepoTags:['zevyrn-ci-builder:latest']}]));
+  assert.equal(spawnSync('tar',['-cf',scan,'-C',docker,'config.json','layer.tar','manifest.json'],{encoding:'utf8'}).status,0);
+  const actualSource=spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(),event=join(root,'event.json');writeFileSync(event,JSON.stringify({repository:{id:repositoryId}}));
+  const env={...process.env,QUALITY_SOURCE:actualSource,GITHUB_SHA:actualSource,GITHUB_REPOSITORY:repository,GITHUB_EVENT_NAME:'push',GITHUB_REF:'refs/heads/main',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/quality-security.yml@refs/heads/main`,GITHUB_RUN_ID:'42',GITHUB_RUN_ATTEMPT:'2',GITHUB_EVENT_PATH:event};
+  const result=spawnSync(process.execPath,['scripts/release-integrity.mjs','retain-builder',archive,scan,retained],{env,encoding:'utf8'});assert.equal(result.status,0,result.stderr);
+  const identity=JSON.parse(readFileSync(join(retained,'builder-identity.json')));assert.equal(identity.scanArchiveSHA256,hash(readFileSync(scan)));
+  const raw=join(root,'report.json');writeFileSync(raw,JSON.stringify({SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:identity.configDigest,DiffIDs:identity.diffIDs}}));
+  const check=()=>spawnSync(process.execPath,['scripts/release-integrity.mjs','builder-scan-binding',join(retained,'builder-identity.json'),scan,raw],{encoding:'utf8'});
+  assert.equal(check().status,0);writeFileSync(raw,JSON.stringify({SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:sha,DiffIDs:identity.diffIDs}}));assert.equal(check().status,1);
+  writeFileSync(scan,Buffer.from('changed scanned archive'));assert.equal(check().status,1);
+});
+test('fresh combined security accepts zero approved findings and rejects unauthorized findings and missing config-secret coverage',async()=>{
+  const directory=mkdtempSync(join(tmpdir(),'zevyrn-combined-security-'));mkdirSync(join(directory,'builder'));
+  const f=evidenceFixture();f.evidence.runtime.imageID=sha;f.evidence.runtime.results=[{type:'alpine',vulnerabilities:[],secrets:[]}];f.evidence.builder.imageID=sha;
+  const write=()=>{for(const [name,value] of Object.entries({'runtime-scan.json':f.evidence.runtime,'builder-scan.json':f.evidence.builder,'release-scan-identity.json':f.evidence.scanIdentity,'builder/builder-identity.json':{configDigest:sha}}))writeFileSync(join(directory,name),JSON.stringify(value));};
+  write();await combinedSecurity(directory,f.identity);
+  const changes=[()=>f.evidence.builder.results[0].vulnerabilities.push({id:'CVE-2026-999999',severity:'HIGH'}),()=>f.evidence.builder.secrets=1,()=>f.evidence.runtime.imageID=sha256Other(),()=>f.evidence.scanIdentity.imageConfigScanners=[],()=>f.evidence.scanIdentity.scanners=['vuln'],()=>f.evidence.scanIdentity.runtimeImageID=sha256Other()];
+  for(const change of changes){const before=clone(f);change();write();await assert.rejects(combinedSecurity(directory,f.identity));Object.assign(f,before);}
+});
+test('release ZIP transport and browser-only transfer preserve pre-extraction special-entry and checksum rejection',async()=>{
+  const {yazl}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+  const plain=async entries=>{const zip=new yazl.ZipFile(),chunks=[];const done=new Promise(resolve=>{zip.outputStream.on('data',b=>chunks.push(b));zip.outputStream.on('end',()=>resolve(Buffer.concat(chunks)));});for(const [name,bytes] of Object.entries(entries))zip.addReadStream(Readable.from([bytes]),name,{mode:0o100644,forceDosTimestamp:true});zip.end();return done;};
+  const content=Buffer.from('{"suites":[]}'),browser=await plain({'browser-results.json':content}),root=mkdtempSync(join(tmpdir(),'zevyrn-release-zip-'));
+  await qualityZip(browser,'sha256:'+hash(browser),join(root,'browser'),{files:['browser-results.json']});assert.equal(readFileSync(join(root,'browser/browser-results.json'),'utf8'),content.toString());
+  const transport=Buffer.from(JSON.stringify({schemaVersion:1,purpose:'quality',promotionEligible:false,files:{'release.json':hash(content)}})),bundle=await plain({'release.json':content,'transport.json':transport});
+  await qualityZip(bundle,'sha256:'+hash(bundle),join(root,'release'),{manifest:'transport.json'});
+  await assert.rejects(qualityZip(bundle,sha,join(root,'bad-checksum'),{manifest:'transport.json'}));assert(!existsSync(join(root,'bad-checksum')));
+  const symlink=await artifactZip([{name:'builder.oci.tar',mode:0o120777}]);await assert.rejects(qualityZip(symlink,'sha256:'+hash(symlink),join(root,'symlink'),{manifest:'quality.json',builder:true}));assert(!existsSync(join(root,'symlink')));
+  await assert.rejects(qualityZip(bundle,'sha256:'+hash(bundle),join(root,'wrong-browser'),{files:['browser-results.json']}));assert(!existsSync(join(root,'wrong-browser')));
+});
 function dockerFixture(compressed=false){
   const layer=Buffer.from('synthetic layer bytes'),c=config();c.rootfs.diff_ids=['sha256:'+hash(layer)];c.history=[{created_by:'COPY runtime fixture',empty_layer:false}];
   const bytes=Buffer.from(JSON.stringify(c)),identity={sourceCommit:source,sourceTree:tree,archiveSHA256:'e'.repeat(64),indexDigest:sha,configDigest:'sha256:'+hash(bytes),config:c,diffIDs:c.rootfs.diff_ids};
@@ -283,7 +422,7 @@ test('candidate quality validation checks pinned base, patched packages and hard
     if(job.permissions)assert.deepEqual(job.permissions,{contents:'read',actions:'read'});
     for(const step of job.steps){
       assert(!/docker (?:push|login)|--push|skopeo login|gh (?:workflow run|release)|ssh\s/.test(step.run??''));
-      for(const line of (step.run??'').split('\n').filter(line=>line.includes('skopeo copy')))assert.match(line,/oci-archive:artifacts\/security\/archive\.oci\.tar docker-daemon:zevyrn-ci-runtime:latest$/);
+      for(const line of (step.run??'').split('\n').filter(line=>line.includes('skopeo copy')))assert.match(line,/(?:oci-archive:artifacts\/security\/archive\.oci\.tar docker-daemon:zevyrn-ci-runtime:latest|docker-daemon:zevyrn-ci-builder:latest "oci-archive:\$RUNNER_TEMP\/retained-builder\/builder\.oci\.tar")$/);
     }
   }
   for(const publisher of ['publish-qualified-image','publish-maintenance-image'])assert.deepEqual(Object.keys(yaml.parse(readFileSync(`.github/workflows/${publisher}.yml`,'utf8')).on),['workflow_dispatch']);
@@ -537,6 +676,27 @@ test('quality CLI authenticates an actual retained OCI packet and rejects change
   const consumed=spawnSync(process.execPath,['scripts/release-integrity.mjs','quality-verify',transported.destination],{env,encoding:'utf8'});
   assert.equal(consumed.status,0,consumed.stderr);
   assert.equal(JSON.parse(readFileSync(join(packet,'quality.json'))).promotionEligible,false);
+  // Exercise the actual cross-run packet validator used by combined-fetch/seal,
+  // including real tar bytes, retained inventories and independent browser record.
+  const releaseRoot=mkdtempSync(join(tmpdir(),'zevyrn-cross-run-')),builderDir=join(releaseRoot,'builder'),builderOCI=join(builderDir,'builder.oci.tar'),builderFiles=join(releaseRoot,'builder-fixture');mkdirSync(builderDir);mkdirSync(builderFiles);
+  const builderModel=builderGraphFixture();for(const [name,bytes] of builderModel.members){const path=join(builderFiles,name);mkdirSync(join(path,'..'),{recursive:true});writeFileSync(path,bytes);}
+  assert.equal(spawnSync('tar',['-cf',builderOCI,'-C',builderFiles,...builderModel.members.keys()],{encoding:'utf8'}).status,0);
+  const selected={...mainReleaseFixture().check(),sourceCommit:identity.sourceCommit,sourceTree:identity.sourceTree,createdAt:new Date(Date.now()-600000).toISOString(),startedAt:new Date(Date.now()-600000).toISOString()};
+  const builderIdentity={...await inspectBuilderArchive(builderOCI),scanArchiveSHA256:'a'.repeat(64),sourceCommit:identity.sourceCommit,sourceTree:identity.sourceTree,runId:42,runAttempt:2};
+  writeFileSync(join(builderDir,'builder-identity.json'),JSON.stringify(builderIdentity));
+  writeFileSync(join(builderDir,'quality.json'),JSON.stringify({schemaVersion:1,purpose:'quality',promotionEligible:false,files:await snapshot(builderDir)}));
+  writeFileSync(join(packet,'builder-reference.json'),JSON.stringify({identity:builderIdentity,artifact:selected.artifacts.builder}));
+  const currentScanner={Version:'0.76.0',VulnerabilityDB:{Version:2,UpdatedAt:new Date(Date.now()-600000).toISOString(),DownloadedAt:new Date().toISOString(),NextUpdate:new Date(Date.now()+86400000).toISOString()}};
+  writeFileSync(join(packet,'scanner-version.json'),JSON.stringify(currentScanner));
+  const builderSummary={...evidence.builder,imageID:builderIdentity.configDigest};writeFileSync(join(packet,'builder-scan.json'),JSON.stringify(builderSummary));
+  assert.equal(cli('quality-record').status,0);cpSync(packet,join(releaseRoot,'runtime'),{recursive:true});mkdirSync(join(releaseRoot,'browser'));
+  const ctx=JSON.parse(readFileSync(join(packet,'quality.json'))).context,browserRecord={...ctx,archiveSHA256:identity.archiveSHA256,indexDigest:identity.indexDigest,assetsSHA256:identity.assetsSHA256,suites:suites.map(name=>({name,conclusion:'success'}))};
+  const browserPath=join(releaseRoot,'browser/browser-results.json');writeFileSync(browserPath,JSON.stringify(browserRecord));
+  await authenticatePackets(releaseRoot,selected);
+  for(const change of [s=>s.sourceTree=source,s=>s.sourceCommit=tree,s=>s.runAttempt++,s=>s.artifacts.builder.id++]){const s=clone(selected);change(s);await assert.rejects(authenticatePackets(releaseRoot,s));}
+  for(const change of [b=>b.suites.pop(),b=>b.assetsSHA256='a'.repeat(64),b=>b.promotionEligible=true]){const b=clone(browserRecord);change(b);writeFileSync(browserPath,JSON.stringify(b));await assert.rejects(authenticatePackets(releaseRoot,selected));}writeFileSync(browserPath,JSON.stringify(browserRecord));
+  for(const name of ['builder/builder.oci.tar','runtime/runtime-sbom.cdx.json','runtime/health.json']){const file=join(releaseRoot,name);renameSync(file,file+'.missing');await assert.rejects(authenticatePackets(releaseRoot,selected));renameSync(file+'.missing',file);}
+  writeFileSync(builderOCI,Buffer.from('substituted OCI archive'));await assert.rejects(authenticatePackets(releaseRoot,selected));
   assert.equal(cli('quality-verify',{GITHUB_RUN_ATTEMPT:'3'}).status,1);
   const original=readFileSync(archive);writeFileSync(archive,Buffer.concat([original,Buffer.from('changed')]));assert.equal(cli('quality-verify').status,1);writeFileSync(archive,original);
   writeFileSync(join(packet,'identity.json'),JSON.stringify({...identity,indexDigest:sha256Other()}));assert.equal(cli('quality-verify').status,1);writeFileSync(join(packet,'identity.json'),identityBytes);

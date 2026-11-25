@@ -107,6 +107,14 @@ jobs:
           docker image inspect --format 'registry-digests={{json .RepoDigests}}' zevyrn-ci-builder zevyrn-ci-runtime >> artifacts/security/image-identities.txt
           grep '^FROM ' Dockerfile >> artifacts/security/image-identities.txt
           docker save -o "$RUNNER_TEMP/builder.tar" zevyrn-ci-builder
+      - name: Retain exact main builder OCI without rebuilding
+        if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/retained-builder"
+          skopeo copy --override-os linux --override-arch amd64 docker-daemon:zevyrn-ci-builder:latest "oci-archive:$RUNNER_TEMP/retained-builder/builder.oci.tar"
+          node scripts/release-integrity.mjs retain-builder "$RUNNER_TEMP/retained-builder/builder.oci.tar" "$RUNNER_TEMP/builder.tar" "$RUNNER_TEMP/retained-builder"
       - name: Prepare image-bound runtime scan archive
         id: scan_archive
         run: node scripts/release-integrity.mjs prepare-scan artifacts/security/identity.json "$RUNNER_TEMP/runtime-scan.tar" artifacts/security/runtime-scan-identity.json
@@ -138,6 +146,9 @@ jobs:
         run: |
           trivy image --input "$RUNNER_TEMP/builder.tar" --scanners vuln,secret --image-config-scanners secret --format json --output "$RUNNER_TEMP/builder-raw.json"
           node scripts/ci-security.mjs report builder "$RUNNER_TEMP/builder-raw.json" artifacts/security/builder-scan.json
+          if test -f "$RUNNER_TEMP/retained-builder/builder-identity.json"; then
+            node scripts/release-integrity.mjs builder-scan-binding "$RUNNER_TEMP/retained-builder/builder-identity.json" "$RUNNER_TEMP/builder.tar" "$RUNNER_TEMP/builder-raw.json"
+          fi
       - name: Generate and validate runtime SBOM
         id: sbom
         if: ${{ !cancelled() && steps.runtime_scan.outcome == 'success' }}
@@ -210,7 +221,25 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
       - name: Verify complete non-promotable quality evidence
+        id: quality_record
         run: node scripts/release-integrity.mjs quality-record artifacts/security
+      - name: Retain successful main builder separately
+        id: retained_builder
+        if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quality-builder-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/retained-builder/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Bind main builder artifact to quality evidence
+        if: ${{ steps.retained_builder.outcome == 'success' }}
+        env:
+          BUILDER_ARTIFACT_ID: ${{ steps.retained_builder.outputs.artifact-id }}
+          BUILDER_ARTIFACT_DIGEST: sha256:${{ steps.retained_builder.outputs.artifact-digest }}
+        run: |
+          node scripts/release-integrity.mjs builder-reference "$RUNNER_TEMP/retained-builder/builder-identity.json" "$BUILDER_ARTIFACT_ID" "$BUILDER_ARTIFACT_DIGEST" artifacts/security/builder-reference.json
+          node scripts/release-integrity.mjs quality-record artifacts/security
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: packet
         with:
