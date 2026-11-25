@@ -72,6 +72,111 @@ test('qualification is manual-only and preserves exact release source, evidence 
   assert(promotion.includes('age<=3600000'));assert(promotion.includes('--all --preserve-digests'));
 });
 
+test('combined release isolates manual verification and keeps tag publication locked during migration', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+  const w=yaml.parse(await read('.github/workflows/release.yml'));
+  assert.deepEqual(Object.keys(w.on).sort(),['push','workflow_dispatch']);assert.deepEqual(w.on.push,{tags:['v*']});
+  assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs),['operation','quality_run_id']);
+  assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['verify','release']);assert.equal(w.on.workflow_dispatch.inputs.operation.default,'verify');
+  assert.deepEqual(w.permissions,{});assert.equal(w.env.LIVE_PUBLICATION_ENABLED,'false');
+  assert.equal(w.concurrency.group,'zevyrn-ghcr-${{ github.ref_name }}-publication');assert.equal(w.concurrency['cancel-in-progress'],false);
+  assert.deepEqual(Object.keys(w.jobs),['resolve','qualify','publish','consumer']);
+  const {resolve:resolveJob,qualify,publish,consumer}=w.jobs;
+  for(const job of [resolveJob,qualify]){assert.deepEqual(job.permissions,{contents:'read',actions:'read'});assert(!job.environment&&!job.secrets);}
+  assert.deepEqual(publish.needs,['resolve','qualify']);assert.deepEqual(publish.permissions,{contents:'read',actions:'read',packages:'write'});
+  assert.equal(publish.environment,'zevyrn-ghcr-publication');
+  assert.equal(publish.if,"${{ false && startsWith(github.ref, 'refs/tags/v') && needs.resolve.outputs.publish == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'release')) }}");
+  assert.deepEqual(consumer.permissions,{});assert.deepEqual(consumer.needs,['qualify','publish']);assert(!consumer.environment);
+  const all=JSON.stringify(w);assert(!all.includes('secrets.')&&!all.includes('vars.')&&!all.includes('pull_request_target'));
+  for(const job of Object.values(w.jobs))for(const step of job.steps){assert(!step['continue-on-error']);if(step.uses?.startsWith('actions/checkout@')){assert.equal(step.with['persist-credentials'],false);assert.equal(step.with['fetch-depth'],0);}}
+  const script=qualify.steps.map(s=>s.run??'').join('\n');
+  for(const required of ['combined-resolve','cmp selection/selection.json','combined-fetch','prepare-scan','scan-runtime','scan-builder','ci-security.mjs trivy','combined-seal','--download-db-only'])assert(script.includes(required),required);
+  assert(!/docker (?:build|buildx build)|npm (?:test|run build)|release-integrity\.mjs browser/.test(script));
+  const gate=qualify.steps.find(s=>s.id==='security');assert(gate.run.includes('steps.runtime_scan.outcome')&&gate.run.includes('steps.builder_scan.outcome'));
+  const diagnostics=qualify.steps.find(s=>s.with?.name?.startsWith('release-security-'));assert.equal(diagnostics.if,'always()');
+  assert(!/raw\.json|\.tar|assets\//.test(diagnostics.with.path));
+  const promotion=publish.steps.map(s=>s.run??'').join('\n');
+  assert(promotion.includes('combined-download'));assert(promotion.indexOf('combined-revalidate')<promotion.indexOf('skopeo login'));
+  assert(promotion.includes('--all --preserve-digests'));assert(promotion.indexOf('release-integrity.mjs tags')<promotion.indexOf('skopeo copy'));
+  assert(!/docker build|npm test|release-integrity\.mjs browser/.test(promotion));
+  const anonymous=consumer.steps.map(s=>s.run??'').join('\n');
+  assert(anonymous.includes('mktemp -d')&&anonymous.includes("printf '{}\\n'"));assert(anonymous.includes('unset DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE GH_TOKEN GITHUB_TOKEN'));
+  assert.equal((anonymous.match(/docker pull --platform linux\/amd64/g)||[]).length,4); // two recorded commands plus two actual pulls
+  assert(!/login|secrets\.|github\.token|download-artifact|checkout@/.test(JSON.stringify(consumer)));
+  assert(anonymous.includes('tagExitCode')&&anonymous.includes('digestExitCode')&&anonymous.includes('docker version'));
+});
+
+// Local evaluation of the current condition's Boolean/string subset, using
+// canonical strings, plus GitHub's implicit success() dependency requirement.
+// This is not a hosted Actions expression engine or a hosted execution test.
+function locallyEligible(job,context){
+  const dependencies=Array.isArray(job.needs)?job.needs:job.needs?[job.needs]:[];
+  if(!dependencies.every(name=>context.needs[name]?.result==='success'))return false;
+  if(job.if===undefined)return true;
+  const expression=job.if.match(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/)?.[1];assert(expression);
+  const evaluate=new Function('github','needs','inputs','vars','env','startsWith','return Boolean('+expression+');');
+  return evaluate(context.github,context.needs,context.inputs,context.vars,context.env,(value,prefix)=>value.startsWith(prefix));
+}
+const publicationContext=(event,ref,operation)=>({
+  github:{event_name:event,ref},inputs:{operation},vars:{},env:{LIVE_PUBLICATION_ENABLED:'false'},
+  needs:{resolve:{result:'success',outputs:{publish:'true'}},qualify:{result:'success'}}
+});
+
+test('publication literal migration gate rejects the original counterexamples and every runtime override', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async t=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),w=yaml.parse(await read('.github/workflows/release.yml')),job=w.jobs.publish;
+  assert.match(job.if,/^\$\{\{\s*false\s*&&/);assert.equal(w.env.LIVE_PUBLICATION_ENABLED,'false');
+  const cases=[
+    ['version-tag push',publicationContext('push','refs/tags/v1.2.3'),true],
+    ['manual release',publicationContext('workflow_dispatch','refs/tags/v1.2.3','release'),true],
+    ['manual verification',publicationContext('workflow_dispatch','refs/heads/main','verify'),false],
+    ['main push',publicationContext('push','refs/heads/main'),false],
+    ['pull request',publicationContext('pull_request','refs/pull/4/merge'),false]
+  ];
+  // Removing only the new literal reproduces the previously accepted P2 case.
+  // It also proves the pre-existing event/mode/output conditions still apply.
+  const ungated={...job,if:job.if.replace(/^(\$\{\{\s*)false\s*&&\s*/,'$1')};
+  for(const [name,context,previouslyEligible] of cases){
+    assert.equal(locallyEligible(ungated,context),previouslyEligible,name+' original condition');
+    assert.equal(locallyEligible(job,context),false,name+' corrected condition');
+    t.diagnostic(name+': original='+previouslyEligible+', corrected=false (local evaluation)');
+    for(const override of [
+      c=>c.vars.LIVE_PUBLICATION_ENABLED='true',
+      c=>c.env.LIVE_PUBLICATION_ENABLED='true',
+      c=>Object.assign(c.inputs,{LIVE_PUBLICATION_ENABLED:'true',publish:true,operation:'release'}),
+      c=>c.needs.resolve.outputs.publish='true',
+      c=>{c.vars.LIVE_PUBLICATION_ENABLED='true';c.env.LIVE_PUBLICATION_ENABLED='true';Object.assign(c.inputs,{LIVE_PUBLICATION_ENABLED:'true',publish:true,operation:'release'});c.needs.resolve.outputs.publish='true';}
+    ]){const changed=structuredClone(context);override(changed);assert.equal(locallyEligible(job,changed),false,name+' runtime override');}
+    for(const outcome of ['failure','cancelled','skipped']){const changed=structuredClone(context);changed.needs.qualify.result=outcome;assert.equal(locallyEligible(job,changed),false);assert.equal(locallyEligible(ungated,changed),false);}
+  }
+  for(const output of ['',false,true,'false','TRUE',"true' || true"]){const c=publicationContext('push','refs/tags/v1.2.3');c.needs.resolve.outputs.publish=output;assert.equal(locallyEligible(job,c),false);}
+  const noOutput=publicationContext('push','refs/tags/v1.2.3');noOutput.needs.resolve.outputs.publish='false';assert.equal(locallyEligible(ungated,noOutput),false);
+  const verifyOnTag=publicationContext('workflow_dispatch','refs/tags/v1.2.3','verify');assert.equal(locallyEligible(ungated,verifyOnTag),false);
+});
+
+test('consumer success dependencies remain enforced and manual read-only qualification remains available', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),w=yaml.parse(await read('.github/workflows/release.yml'));
+  assert.deepEqual(w.jobs.consumer.needs,['qualify','publish']);assert.equal(w.jobs.consumer.if,undefined);
+  const context=publicationContext('workflow_dispatch','refs/heads/main','verify');context.needs.publish={result:'success'};
+  assert.equal(locallyEligible(w.jobs.consumer,context),true);
+  for(const name of ['qualify','publish'])for(const outcome of ['failure','cancelled','skipped']){const c=structuredClone(context);c.needs[name].result=outcome;assert.equal(locallyEligible(w.jobs.consumer,c),false,name+' '+outcome);}
+  assert.equal(w.jobs.qualify.needs,'resolve');assert.equal(w.jobs.qualify.if,undefined);
+  assert.equal(locallyEligible(w.jobs.resolve,context),true);assert.equal(locallyEligible(w.jobs.qualify,context),true);
+  assert.equal(locallyEligible(w.jobs.publish,context),false);
+  for(const name of ['resolve','qualify']){assert.deepEqual(w.jobs[name].permissions,{contents:'read',actions:'read'});assert(!w.jobs[name].environment);}
+});
+
+test('main-only builder retention is separate, scan-bound, success-only and absent from PR/Windows transfers', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),w=yaml.parse(await read('.github/workflows/quality-security.yml'));
+  const steps=w.jobs['quality-image'].steps,retain=steps.find(s=>s.name==='Retain exact main builder OCI without rebuilding'),upload=steps.find(s=>s.id==='retained_builder'),reference=steps.find(s=>s.name==='Bind main builder artifact to quality evidence');
+  const mainOnly="${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}";
+  assert.equal(retain.if,mainOnly);assert.equal(upload.if,mainOnly);assert.equal(reference.if,"${{ steps.retained_builder.outcome == 'success' }}");
+  assert(retain.run.includes('docker-daemon:zevyrn-ci-builder:latest'));assert(retain.run.includes('retain-builder')&&retain.run.includes('$RUNNER_TEMP/builder.tar'));assert(!/buildx|docker build/.test(retain.run));
+  assert.equal(upload.with.name,'quality-builder-${{ github.run_id }}-${{ github.run_attempt }}');assert.equal(upload.with.path,'${{ runner.temp }}/retained-builder/');assert.equal(upload.with['retention-days'],7);
+  assert(steps.indexOf(upload)>steps.findIndex(s=>s.id==='hardening'));assert(steps.indexOf(upload)>steps.findIndex(s=>s.id==='security'));assert(steps.indexOf(upload)>steps.findIndex(s=>s.id==='quality_record'));
+  assert(reference.run.includes('builder-reference.json'));assert(reference.run.includes('quality-record'));assert(steps.indexOf(reference)<steps.findIndex(s=>s.id==='packet'));
+  assert(!JSON.stringify(w.jobs.browser).includes('quality-builder-'));assert.equal(steps.find(s=>s.id==='packet').with.path,'artifacts/security/');
+});
+
 test('standalone is loopback-only; HTTPS alternatives do not publish the backend', async () => {
   const local = await read('compose.yaml');
   assert.match(local, /127\.0\.0\.1:\$\{KEYSMITH_PORT:-18080\}:8080/);
