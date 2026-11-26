@@ -49,7 +49,7 @@ test('qualification is manual-only and preserves exact release source, evidence 
   const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
   const qualifier=yaml.parse(await read('.github/workflows/qualify-maintenance-image.yml'));
   assert.deepEqual(Object.keys(qualifier.on),['workflow_dispatch']);
-  assert.deepEqual(qualifier.on.workflow_dispatch.inputs.source_commit,{description:'Exact approved main commit containing v1.2.3 metadata',required:true,type:'string'});
+  assert.deepEqual(qualifier.on.workflow_dispatch.inputs.source_commit,{description:'Exact approved main commit containing v1.2.4 metadata',required:true,type:'string'});
   assert.deepEqual(Object.keys(qualifier.jobs).sort(),['browser','runtime','seal']);
   assert.deepEqual(qualifier.permissions,{contents:'read',actions:'read'});
   assert.equal(qualifier.concurrency['cancel-in-progress'],false);
@@ -72,20 +72,20 @@ test('qualification is manual-only and preserves exact release source, evidence 
   assert(promotion.includes('age<=3600000'));assert(promotion.includes('--all --preserve-digests'));
 });
 
-test('combined release isolates manual verification and keeps tag publication locked during migration', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+test('combined release isolates manual verification and enables only exact v1.2.4 publication', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async()=>{
   const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
   const w=yaml.parse(await read('.github/workflows/release.yml'));
   assert.deepEqual(Object.keys(w.on).sort(),['push','workflow_dispatch']);assert.deepEqual(w.on.push,{tags:['v*']});
   assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs),['operation','quality_run_id']);
   assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['verify','release']);assert.equal(w.on.workflow_dispatch.inputs.operation.default,'verify');
-  assert.deepEqual(w.permissions,{});assert.equal(w.env.LIVE_PUBLICATION_ENABLED,'false');
+  assert.deepEqual(w.permissions,{});assert.equal(w.env.LIVE_PUBLICATION_ENABLED,'true');
   assert.equal(w.concurrency.group,'zevyrn-ghcr-${{ github.ref_name }}-publication');assert.equal(w.concurrency['cancel-in-progress'],false);
   assert.deepEqual(Object.keys(w.jobs),['resolve','qualify','publish','consumer']);
   const {resolve:resolveJob,qualify,publish,consumer}=w.jobs;
   for(const job of [resolveJob,qualify]){assert.deepEqual(job.permissions,{contents:'read',actions:'read'});assert(!job.environment&&!job.secrets);}
   assert.deepEqual(publish.needs,['resolve','qualify']);assert.deepEqual(publish.permissions,{contents:'read',actions:'read',packages:'write'});
   assert.equal(publish.environment,'zevyrn-ghcr-publication');
-  assert.equal(publish.if,"${{ false && startsWith(github.ref, 'refs/tags/v') && needs.resolve.outputs.publish == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'release')) }}");
+  assert.equal(publish.if,"${{ startsWith(github.ref, 'refs/tags/v') && github.ref == 'refs/tags/v1.2.4' && needs.resolve.outputs.publish == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'release')) }}");
   assert.deepEqual(consumer.permissions,{});assert.deepEqual(consumer.needs,['qualify','publish']);assert(!consumer.environment);
   const all=JSON.stringify(w);assert(!all.includes('secrets.')&&!all.includes('vars.')&&!all.includes('pull_request_target'));
   for(const job of Object.values(w.jobs))for(const step of job.steps){assert(!step['continue-on-error']);if(step.uses?.startsWith('actions/checkout@')){assert.equal(step.with['persist-credentials'],false);assert.equal(step.with['fetch-depth'],0);}}
@@ -118,39 +118,45 @@ function locallyEligible(job,context){
   return evaluate(context.github,context.needs,context.inputs,context.vars,context.env,(value,prefix)=>value.startsWith(prefix));
 }
 const publicationContext=(event,ref,operation)=>({
-  github:{event_name:event,ref},inputs:{operation},vars:{},env:{LIVE_PUBLICATION_ENABLED:'false'},
+  github:{event_name:event,ref},inputs:{operation},vars:{},env:{LIVE_PUBLICATION_ENABLED:'true'},
   needs:{resolve:{result:'success',outputs:{publish:'true'}},qualify:{result:'success'}}
 });
 
-test('publication literal migration gate rejects the original counterexamples and every runtime override', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async t=>{
+test('activated publication condition rejects inconsistent resolver outputs outside exact release entry points', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async t=>{
   const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),w=yaml.parse(await read('.github/workflows/release.yml')),job=w.jobs.publish;
-  assert.match(job.if,/^\$\{\{\s*false\s*&&/);assert.equal(w.env.LIVE_PUBLICATION_ENABLED,'false');
+  assert.doesNotMatch(job.if,/^\$\{\{\s*false\s*&&/);assert.equal(w.env.LIVE_PUBLICATION_ENABLED,'true');
   const cases=[
-    ['version-tag push',publicationContext('push','refs/tags/v1.2.3'),true],
-    ['manual release',publicationContext('workflow_dispatch','refs/tags/v1.2.3','release'),true],
+    ['version-tag push',publicationContext('push','refs/tags/v1.2.4'),true],
+    ['manual release',publicationContext('workflow_dispatch','refs/tags/v1.2.4','release'),true],
     ['manual verification',publicationContext('workflow_dispatch','refs/heads/main','verify'),false],
     ['main push',publicationContext('push','refs/heads/main'),false],
-    ['pull request',publicationContext('pull_request','refs/pull/4/merge'),false]
+    ['pull request',publicationContext('pull_request','refs/pull/4/merge'),false],
+    ['verification from tag',publicationContext('workflow_dispatch','refs/tags/v1.2.4','verify'),false],
+    ['release from main',publicationContext('workflow_dispatch','refs/heads/main','release'),false],
+    ['previous tag',publicationContext('push','refs/tags/v1.2.3'),false],
+    ['future tag',publicationContext('push','refs/tags/v1.2.5'),false],
+    ['lookalike tag',publicationContext('push','refs/tags/v1.2.4-rc1'),false],
+    ['PR with tag ref',publicationContext('pull_request','refs/tags/v1.2.4','release'),false],
+    ['schedule with tag ref',publicationContext('schedule','refs/tags/v1.2.4','release'),false],
+    ['missing manual operation',publicationContext('workflow_dispatch','refs/tags/v1.2.4'),false]
   ];
-  // Removing only the new literal reproduces the previously accepted P2 case.
-  // It also proves the pre-existing event/mode/output conditions still apply.
-  const ungated={...job,if:job.if.replace(/^(\$\{\{\s*)false\s*&&\s*/,'$1')};
-  for(const [name,context,previouslyEligible] of cases){
-    assert.equal(locallyEligible(ungated,context),previouslyEligible,name+' original condition');
-    assert.equal(locallyEligible(job,context),false,name+' corrected condition');
-    t.diagnostic(name+': original='+previouslyEligible+', corrected=false (local evaluation)');
+  // Evaluate the actual parsed job expression, with GitHub's implicit successful
+  // needs requirement. A forged resolver output cannot change event/ref/mode.
+  for(const [name,context,eligible] of cases){
+    assert.equal(locallyEligible(job,context),eligible,name+' actual condition');
+    t.diagnostic(name+': eligible='+eligible+' (local evaluation)');
     for(const override of [
       c=>c.vars.LIVE_PUBLICATION_ENABLED='true',
       c=>c.env.LIVE_PUBLICATION_ENABLED='true',
-      c=>Object.assign(c.inputs,{LIVE_PUBLICATION_ENABLED:'true',publish:true,operation:'release'}),
+      c=>Object.assign(c.inputs,{LIVE_PUBLICATION_ENABLED:'true',publish:true}),
       c=>c.needs.resolve.outputs.publish='true',
-      c=>{c.vars.LIVE_PUBLICATION_ENABLED='true';c.env.LIVE_PUBLICATION_ENABLED='true';Object.assign(c.inputs,{LIVE_PUBLICATION_ENABLED:'true',publish:true,operation:'release'});c.needs.resolve.outputs.publish='true';}
-    ]){const changed=structuredClone(context);override(changed);assert.equal(locallyEligible(job,changed),false,name+' runtime override');}
-    for(const outcome of ['failure','cancelled','skipped']){const changed=structuredClone(context);changed.needs.qualify.result=outcome;assert.equal(locallyEligible(job,changed),false);assert.equal(locallyEligible(ungated,changed),false);}
+      c=>{c.vars.LIVE_PUBLICATION_ENABLED='true';c.env.LIVE_PUBLICATION_ENABLED='true';Object.assign(c.inputs,{LIVE_PUBLICATION_ENABLED:'true',publish:true});c.needs.resolve.outputs.publish='true';}
+    ]){const changed=structuredClone(context);override(changed);assert.equal(locallyEligible(job,changed),eligible,name+' runtime override');}
+    for(const dependency of ['resolve','qualify'])for(const outcome of ['failure','cancelled','skipped','in_progress',undefined]){const changed=structuredClone(context);changed.needs[dependency].result=outcome;assert.equal(locallyEligible(job,changed),false,name+' incomplete '+dependency);}
   }
-  for(const output of ['',false,true,'false','TRUE',"true' || true"]){const c=publicationContext('push','refs/tags/v1.2.3');c.needs.resolve.outputs.publish=output;assert.equal(locallyEligible(job,c),false);}
-  const noOutput=publicationContext('push','refs/tags/v1.2.3');noOutput.needs.resolve.outputs.publish='false';assert.equal(locallyEligible(ungated,noOutput),false);
-  const verifyOnTag=publicationContext('workflow_dispatch','refs/tags/v1.2.3','verify');assert.equal(locallyEligible(ungated,verifyOnTag),false);
+  for(const output of ['',false,true,'false','TRUE',"true' || true"]){const c=publicationContext('push','refs/tags/v1.2.4');c.needs.resolve.outputs.publish=output;assert.equal(locallyEligible(job,c),false);}
+  const noOutput=publicationContext('push','refs/tags/v1.2.4');delete noOutput.needs.resolve.outputs.publish;assert.equal(locallyEligible(job,noOutput),false);
+  const noDependency=publicationContext('push','refs/tags/v1.2.4');delete noDependency.needs.qualify;assert.equal(locallyEligible(job,noDependency),false);
 });
 
 test('consumer success dependencies remain enforced and manual read-only qualification remains available', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async()=>{
@@ -396,12 +402,12 @@ test('release metadata agrees and historical dictionary provenance stays unchang
   assert.equal(pkg.name,'zevyrn');
   assert.equal(lock.name,pkg.name);
   assert.equal(lock.packages[''].name,pkg.name);
-  assert.equal(pkg.version,'1.2.3');
+  assert.equal(pkg.version,'1.2.4');
   assert.equal(lock.version,pkg.version);
   assert.equal(lock.packages[''].version,pkg.version);
   assert.match(await read('Dockerfile'),/org.opencontainers.image.title="Zevyrn"/);
-  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.3"/);
-  assert.match(await read('public/index.html'),/class="version">v1.2.3/);
+  assert.match(await read('Dockerfile'),/org.opencontainers.image.version="1.2.4"/);
+  assert.match(await read('public/index.html'),/class="version">v1.2.4/);
   assert.equal(JSON.parse(await read('data/readability-overrides.json')).version,'0.4.0');
 });
 
@@ -423,7 +429,7 @@ test('all legacy installation and proxy entry points retain their v1.1.0 content
 
 function legacyEquivalent(config) {
   return config
-    .replaceAll('zevyrn:1.2.3-local','keysmith:1.0.0-local')
+    .replaceAll('zevyrn:1.2.4-local','keysmith:1.0.0-local')
     .replaceAll('${ZEVYRN_PORT:-${KEYSMITH_PORT:-18080}}','${KEYSMITH_PORT:-18080}')
     .replaceAll('${ZEVYRN_DOMAIN:-${KEYSMITH_DOMAIN:?Set ZEVYRN_DOMAIN or KEYSMITH_DOMAIN in .env}}','${KEYSMITH_DOMAIN:?Set KEYSMITH_DOMAIN in .env}')
     .replaceAll('${ZEVYRN_BIND_IP:-${KEYSMITH_BIND_IP:?Set ZEVYRN_BIND_IP or KEYSMITH_BIND_IP in .env}}','${KEYSMITH_BIND_IP:?Set KEYSMITH_BIND_IP in .env}')
@@ -439,7 +445,7 @@ test('native configurations preserve the complete legacy security and networking
     const native=await read('compose.zevyrn'+suffix+'.yaml');
     assert.equal(legacyEquivalent(native),await read('compose'+suffix+'.yaml'));
     assert.match(native,/^  zevyrn:$/m);
-    assert.match(native,/image: zevyrn:1\.2\.3-local/);
+    assert.match(native,/image: zevyrn:1\.2\.4-local/);
     assert.match(native,new RegExp('^name: zevyrn'+suffix.replace('.','-')+'$','m'));
     const app=native.split(/\n  (?:traefik|caddy):/)[0];
     assert.doesNotMatch(app,/cap_add:/);
@@ -538,7 +544,7 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
         const result=await render(file,settings);
         assert.ifError(result.error); assert.equal(result.status,0,result.stderr);
         const config=JSON.parse(result.stdout),app=config.services[service];
-        assert.equal(app.image,family==='native'?'zevyrn:1.2.3-local':'keysmith:1.0.0-local');
+        assert.equal(app.image,family==='native'?'zevyrn:1.2.4-local':'keysmith:1.0.0-local');
         assert.equal(app.user,'10001:10001'); assert.equal(app.read_only,true);
         assert.deepEqual(app.cap_drop,['ALL']); assert.ok(app.security_opt.includes('no-new-privileges:true'));
         if(suffix) {
@@ -586,7 +592,7 @@ test('Compose CLI renders both families and enforces .env/shell precedence and r
     const prebuilt=await render('compose.ghcr.yaml');
     assert.equal(prebuilt.status,0,prebuilt.stderr);
     const app=JSON.parse(prebuilt.stdout).services.zevyrn;
-    assert.equal(app.image,'ghcr.io/thestateofwhere/zevyrn:1.2.3');assert.equal(app.build,undefined);
+    assert.equal(app.image,'ghcr.io/thestateofwhere/zevyrn:1.2.4');assert.equal(app.build,undefined);
     assert.equal(app.user,'10001:10001');assert.equal(app.read_only,true);
     const override='ghcr.io/thestateofwhere/zevyrn@sha256:'+'a'.repeat(64);
     const selected=await render('compose.ghcr.yaml',{ZEVYRN_IMAGE:override});

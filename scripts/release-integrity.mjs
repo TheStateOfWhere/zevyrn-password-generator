@@ -12,7 +12,7 @@ import {validateBuilderAcceptance} from './ci-security.mjs';
 const builderExceptions=JSON.parse(readFileSync(new URL('./ci-builder-exceptions.json',import.meta.url)));
 export const repository='TheStateOfWhere/zevyrn-password-generator';
 export const repositoryId=1421770645;
-export const version='1.2.3';
+export const version='1.2.4';
 export const suites=['selection','keysmith','profiles','themes','contrast-regression','ui-corrections','focus-copy','regeneration'];
 const sourceURL='https://github.com/'+repository;
 const manifestType='application/vnd.oci.image.manifest.v1+json';
@@ -263,7 +263,7 @@ export function validateRun(runInfo,jobs,artifacts,sourceCommit,now=Date.now()) 
   assert(jobs.total_count===3&&jobs.jobs.length===3);same(jobs.jobs.map(j=>j.name).sort(),['browser','runtime','seal']);
   assert(jobs.jobs.every(j=>j.status==='completed'&&j.conclusion==='success'&&j.run_id===runInfo.id&&j.run_attempt===runInfo.run_attempt),'Required job did not succeed in this attempt');
   assert(artifacts.total_count===artifacts.artifacts.length&&artifacts.total_count<=100);
-  const expected=`zevyrn-v1.2.3-qualified-${runInfo.id}-${runInfo.run_attempt}`;
+  const expected=`zevyrn-v1.2.4-qualified-${runInfo.id}-${runInfo.run_attempt}`;
   const matches=artifacts.artifacts.filter(a=>a.name===expected);assert(matches.length===1,'Expected one sealed artifact');
   const a=matches[0];assert(!a.expired&&Number.isSafeInteger(a.id)&&a.id>0&&a.size_in_bytes>0);sha(a.digest);
   assert(a.workflow_run?.id===runInfo.id&&a.workflow_run.head_sha===sourceCommit&&a.workflow_run.head_branch==='main'&&a.workflow_run.repository_id===repositoryId&&a.workflow_run.head_repository_id===repositoryId);
@@ -304,9 +304,9 @@ export function validateTags(response) {
 }
 export function validateReleaseRef(text,expected) {
   commit(expected);const refs=text.trim().split(/\r?\n/).map(line=>line.split(/\s+/));
-  assert(refs.length>=1&&refs.length<=2);assert(refs.every(([sha,ref])=>/^[0-9a-f]{40}$/.test(sha)&&['refs/tags/v1.2.3','refs/tags/v1.2.3^{}'].includes(ref)));
-  assert(refs.filter(([,ref])=>ref==='refs/tags/v1.2.3').length===1);
-  const peeled=refs.filter(([,ref])=>ref==='refs/tags/v1.2.3^{}');assert(peeled.length<=1);assert((peeled[0]??refs[0])[0]===expected,'Release tag moved');
+  assert(refs.length>=1&&refs.length<=2);assert(refs.every(([sha,ref])=>/^[0-9a-f]{40}$/.test(sha)&&['refs/tags/v1.2.4','refs/tags/v1.2.4^{}'].includes(ref)));
+  assert(refs.filter(([,ref])=>ref==='refs/tags/v1.2.4').length===1);
+  const peeled=refs.filter(([,ref])=>ref==='refs/tags/v1.2.4^{}');assert(peeled.length<=1);assert((peeled[0]??refs[0])[0]===expected,'Release tag moved');
 }
 export function validateQuality(info,jobs,source,qualification={purpose:'release',pullRequest:null,qualityEvent:'push',qualityBranch:'main'}) {
   assert(info.repository?.id===repositoryId&&info.head_repository?.id===repositoryId&&info.path==='.github/workflows/quality-security.yml');
@@ -909,7 +909,7 @@ async function main() {
     const selected=await readJSON(args[1]);const result=await verifyPacket(args[0],{purpose:'release',pullRequest:null,sourceCommit:process.env.GITHUB_SHA,sourceTree:context().sourceTree,runId:selected.runId,runAttempt:selected.runAttempt,startedAt:selected.startedAt,artifactCreatedAt:selected.artifactCreatedAt});
     if(process.env.GITHUB_OUTPUT)await writeFile(process.env.GITHUB_OUTPUT,`archive_sha256=${result.identity.archiveSHA256}\nindex_digest=${result.identity.indexDigest}\n`,{flag:'a'});
   } else if(mode==='tags')validateTags(await readJSON(args[0]));
-  else if(mode==='release-ref')validateReleaseRef(run('git',['ls-remote','--exit-code','origin','refs/tags/v1.2.3','refs/tags/v1.2.3^{}']).toString(),process.env.GITHUB_SHA);
+  else if(mode==='release-ref')validateReleaseRef(run('git',['ls-remote','--exit-code','origin','refs/tags/v1.2.4','refs/tags/v1.2.4^{}']).toString(),process.env.GITHUB_SHA);
   else if(mode==='quality'){const ctx=context();validateQuality(await readJSON(args[0]),await readJSON(args[1]),ctx.sourceCommit,ctx);}
   else if(mode==='zip-members'){
     const names=run('unzip',['-Z1',args[0]]).toString().trim().split('\n');const seen=new Set();

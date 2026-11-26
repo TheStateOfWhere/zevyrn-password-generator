@@ -1,3 +1,40 @@
+# Zevyrn 1.2.4 — release automation maintenance — in preparation, 2026-11-25
+
+- Consolidates automatic PR validation into one quality/security workflow. Linux
+  builds, scans, SBOM and hardening checks bind the retained runtime OCI; Windows
+  authenticates that archive and runs all eight browser suites without a separate
+  application compilation. Canonical compiler-byte checks remain on both platforms.
+- Prepares the combined release workflow to qualify retained main runtime and
+  builder images with fresh vulnerability and file/configuration-secret scans,
+  reusing already-bound application, Compose, compiler, SBOM, hardening and browser
+  evidence without rebuilding or repeating those tests.
+- Preserves the builder's authoritative OCI directly from its single Buildx build,
+  verifies exact configuration bytes and ordered layers across Docker loading and
+  scanning, and retains sanitized identity diagnostics. Milestone 2B confirmed the
+  actual round trip and resolution of the prior configuration mismatch.
+- Enables the local source activation controls for exact v1.2.4 tag publication.
+  Owner approval, post-approval identity/freshness checks, the original 24-hour
+  evidence limit and one-hour promotion database limit remain mandatory. Publication
+  preserves the qualified OCI graph; anonymous Docker verification is a separate,
+  credential-free consumer job. Verification and quality records remain non-promotable.
+- Coordinates application, container, Compose and release-guard metadata at 1.2.4,
+  refreshing project/catalog hash anchors without dependency or compiler payload
+  changes. The pinned patched Nginx base and package security floors are unchanged.
+
+No intended application functionality, password-generation, dictionary, UI or
+deployment requirement changes beyond the visible v1.2.4 version. Existing security
+thresholds, exact builder dispositions, runtime hardening and public source/image
+availability remain unchanged. Private/internal-or-localhost deployment remains
+supported. Artifact storage increases are accepted; optimization is deferred.
+
+This candidate is uncommitted and unpublished. Fresh exact-source main quality,
+protected environment tag eligibility and separately authorized release execution
+are required after integration. Milestone 2B evidence does not qualify v1.2.4.
+The historical v1.2.3 anonymous Docker Engine pull remains deferred, not passed
+and nonblocking. Historical release records below are preserved.
+
+---
+
 # Zevyrn 1.2.3 — security maintenance — in preparation, 2026-11-24
 
 - Updates the official Nginx stable Alpine base to 1.30.8 at immutable index
