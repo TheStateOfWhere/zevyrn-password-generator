@@ -40,7 +40,7 @@ around errors, or commit secrets and certificate keys.
 
 ## Published release qualification
 
-The existing v1.2.3 [qualification workflow](.github/workflows/qualify-maintenance-image.yml)
+The existing v1.2.4 [qualification workflow](.github/workflows/qualify-maintenance-image.yml)
 binds source commit/tree, an exact Linux/amd64 OCI archive, runtime assets,
 builder/runtime vulnerability and secret scans, image-configuration secret scans,
 runtime SBOM, hardened runtime checks and eight Microsoft Edge browser suites.
@@ -52,12 +52,12 @@ anonymous Docker Engine pull remains deferred, not passed and nonblocking for
 development. PR-only artifacts are not eligible for publication.
 
 The [combined release workflow](.github/workflows/release.yml) is a replacement
-under validation, with live tag publication explicitly disabled. Its manual
+prepared for v1.2.4 source activation, with exact-version tag and release-purpose
+qualification gates. Local preparation does not authorize a tag or publication. Its manual
 main verification path has no protected-environment or registry-write authority.
 It authenticates retained main runtime/builder artifacts and archive-bound browser
 evidence, freshly scans both images, and creates a separate receipt without
-making original quality evidence promotable. Future authorized activation must
-preserve exact-tag owner approval, revalidation after approval, the 24-hour
+making original quality evidence promotable. Activation preserves exact-tag owner approval, revalidation after approval, the 24-hour
 reused-evidence limit and one-hour promotion database freshness. Publication
 preserves the qualified digest; anonymous Docker Engine verification runs on a
 separate runner without publication credentials. Legacy release paths remain

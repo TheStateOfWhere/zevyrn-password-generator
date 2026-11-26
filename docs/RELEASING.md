@@ -1,5 +1,28 @@
 # Validation and release process
 
+## Milestone 2B engineering acceptance — complete
+
+Accepted main `52ed2054bfe0618ec7c76ba3e541638300feaceb` has tree
+`e25442675684647e251dc2a63fdf12c9bd945ef3`.
+[Main quality 45738635825](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45738635825)
+and [read-only combined verification 45739286399](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45739286399)
+passed on their first attempts. The actual single builder OCI export, authenticated
+Skopeo/Docker load, exact configuration bytes, ordered layers and scan-archive
+checksum round trip passed; the original configuration mismatch is resolved.
+All seven retained artifacts were independently verified. Existing evidence is
+preserved; this closeout does not rerun or extend its eligibility.
+
+Runtime vulnerabilities and secrets were zero; unapproved blocking builder
+findings were zero. The three exact authorized HIGH builder occurrences remained
+visible. Publication and consumer jobs were skipped. The verification receipt and
+original quality packets remain non-promotable and cannot publish v1.2.4.
+
+Observed read-only qualification used 95 runner-seconds and 105 elapsed seconds,
+compared with the archived 273 and 284 seconds: reductions of 65.2% and 63.0%.
+Main quality retained 116,545,978 bytes; verification retained 116,546,361 bytes,
+including the authoritative builder OCI. Increased storage is accepted;
+optimization is deferred. No publication/consumer performance is claimed.
+
 ## Consolidated PR validation
 
 `quality-security.yml` validates PR heads with read-only permissions. Its Linux
@@ -52,35 +75,36 @@ metadata through a PR, then validate the exact merged main source.
    promotion database freshness limit. It copies the qualified OCI graph without
    rebuilding, then verifies the public registry digest and anonymous access.
 
-Current maintenance guards remain version-specific to 1.2.3. A later release
-requires reviewed metadata and guard updates; these commands are not permission
-to republish 1.2.3. Builder-only dispositions remain exact package/version/path
+Current maintenance guards are version-specific to 1.2.4. The published v1.2.3
+identity remains immutable; these commands are not permission to republish it. Builder-only dispositions remain exact package/version/path
 authorizations, not runtime exceptions or a requirement that findings persist.
 
 Public source and images remain supported. Running deployments are supported
 only on private/internal networks or localhost. Use the documented Docker and
 Compose installation paths; release validation does not authorize deployment.
 
-## Combined release workflow — migration, not live activation
+## Combined release workflow — v1.2.4 activation candidate
 
-`release.yml` adds a replacement release path; the existing qualification and
-publication workflows remain operational and unchanged. Its literal
-`LIVE_PUBLICATION_ENABLED: 'false'` migration lock rejects tag execution before
-qualification or approval. Repository variables and dispatch inputs cannot turn
-it on. Enabling live publication requires a separately authorized code review.
-No PR, main push or schedule invokes this workflow.
+`release.yml` is prepared for v1.2.4 with source-level
+`LIVE_PUBLICATION_ENABLED: 'true'` and the temporary literal-false job gate
+removed. Publication still requires the exact `refs/tags/v1.2.4` ref, the existing
+tag-prefix, resolver-output and event/mode predicates, and successful resolve
+and qualify dependencies. Local preparation does not authorize commit, push,
+merge, tag creation, dispatch or publication. The existing maintenance workflows
+remain available with coordinated v1.2.4 guards; no workflow is retired.
+No PR, main push or schedule invokes the release workflow.
 
 Manual dispatch defaults to `operation: verify` and requires an exact
 `quality_run_id`. Verification is accepted only on main and is structurally
 read-only: only `resolve` and `qualify` run. The `publish` job explicitly excludes
-verification dispatch, even after the migration lock changes. Verification cannot
+verification dispatch, including with an inconsistent resolver publication output. Verification cannot
 request the protected environment or obtain `packages: write`; its record has
 `purpose: verification`, `promotionEligible: false`. Original quality records
 always remain unchanged and non-promotable.
 
 Controlled recovery uses the distinct `operation: release` mode from the exact
 version tag, with an explicit quality run. It is rejected on main, on any other
-tag, or while live activation is locked. After separately authorized activation,
+tag. After separately authorized integration and release execution,
 it requires the same source, security, freshness and protected owner approval as
 a tag push. No dispatch input can change the activation lock or bypass approval.
 
@@ -164,14 +188,18 @@ or retries. If main has advanced, stop and review the new source/version rather
 than moving a tag. An expired owner wait requires a newly authorized read-only
 qualification attempt and fresh approval; there is no bypass or automatic rerun.
 
-Current version guards remain 1.2.3. This migration does not authorize republishing
-it. Later versions require coordinated reviewed metadata/guard updates and the
-normal compiler-integrity checks.
+Current version guards are 1.2.4. Fresh exact-source main quality is required
+after integration; the accepted Milestone 2B packet cannot publish this release.
+Before a separately authorized tag event, add only the exact tag `v1.2.4` to
+`zevyrn-ghcr-publication`, retaining the existing owner reviewer, self-review
+policy, disabled administrator bypass and all existing tag allowances. This
+local candidate does not change that environment or create the tag.
 
 ### Replacement before retirement and cost
 
-First validate main builder retention and manual read-only verification on hosted
-runners. Then separately authorize activation and a real version-tag release,
+Milestone 2B main retention and read-only verification are accepted above.
+Validate this activation candidate locally, then obtain separate authorization
+for its commit, hosted PR validation, integration and a real version-tag release,
 including protected approval and anonymous Docker pulls. Only after that path is
 accepted may the two superseded maintenance workflows be disabled under separate
 authorization. Preserve their files/history and legacy validators throughout
@@ -181,11 +209,11 @@ Main quality gains one builder artifact of measured compressed size B. The
 combined qualification artifact retains approximately runtime packet R + builder
 packet B + small browser, receipt and scan records for seven days. This temporary
 second copy costs approximately B + (R+B) extra stored bytes per main/release pair;
-exact sizes and runner time require hosted measurement. PR artifact scope does
+measured Milestone 2B sizes and runner time are recorded above. PR artifact scope does
 not gain builder bytes. Qualification performs zero image/application builds and
 zero browser-suite reruns, but adds fresh two-image scanning, authenticated
 downloads/inspection and post-publication Docker pulls. Locked tool installation
-is retained. No timing reduction is claimed before hosted execution.
+is retained. The observed qualification reductions above exclude publication and consumer stages.
 
 The standalone v1.2.3 anonymous Docker Engine pull check remains deferred, not
 passed and nonblocking; a later release's consumer check cannot clear it.

@@ -6,7 +6,7 @@ import {resolve,relative,sep} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
 const root=fileURLToPath(new URL('../',import.meta.url));
-const catalogSHA256='305ba92a4fd781e3993a522f69d9b302ace9ff2a0ec2f8ba45566ee35005d4e5';
+const catalogSHA256='7a3c7bd8415ce2577ffda10ef7a645792d3ddf87e32f114831f8da9ceeb5d4ff';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function metadataBytes(path) {
   const file=resolve(root,path),stat=await lstat(file);

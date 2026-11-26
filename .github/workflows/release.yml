@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Verify on main, or explicitly recover a release from its exact tag (activation locked)
+        description: Verify on main, or explicitly recover a release from its exact tag after separate authorization
         required: true
         default: verify
         type: choice
@@ -17,9 +17,8 @@ on:
 
 permissions: {}
 env:
-  # Migration lock. Changing this literal requires separately reviewed authorization.
-  # Repository variables and dispatch inputs cannot enable publication.
-  LIVE_PUBLICATION_ENABLED: 'false'
+  # Reviewed source activation; dispatch inputs and repository variables cannot change it.
+  LIVE_PUBLICATION_ENABLED: 'true'
   RELEASE_OPERATION: ${{ inputs.operation || 'release' }}
 concurrency:
   # Share the existing maintenance publisher's version lane during migration.
@@ -170,9 +169,9 @@ jobs:
 
   publish:
     needs: [resolve, qualify]
-    # Immutable migration gate; enabling requires a separately reviewed source change.
-    # Verification dispatch can never enter this environment, even after activation.
-    if: ${{ false && startsWith(github.ref, 'refs/tags/v') && needs.resolve.outputs.publish == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'release')) }}
+    # Only the exact version tag and successful release-purpose qualification may enter.
+    # Verification dispatch can never enter this protected environment.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref == 'refs/tags/v1.2.4' && needs.resolve.outputs.publish == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'release')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: zevyrn-ghcr-publication

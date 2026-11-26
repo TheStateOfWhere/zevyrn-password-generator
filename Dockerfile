@@ -46,7 +46,7 @@ WORKDIR /
 STOPSIGNAL SIGQUIT
 LABEL maintainer="NGINX Docker Maintainers <docker-maint@nginx.com>" \
       org.opencontainers.image.title="Zevyrn" \
-      org.opencontainers.image.version="1.2.3" \
+      org.opencontainers.image.version="1.2.4" \
       org.opencontainers.image.description="Browser-only password generator with local validation and no password storage"
 USER 10001:10001
 EXPOSE 8080
