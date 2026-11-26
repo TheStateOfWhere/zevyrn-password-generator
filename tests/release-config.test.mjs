@@ -170,11 +170,35 @@ test('main-only builder retention is separate, scan-bound, success-only and abse
   const steps=w.jobs['quality-image'].steps,retain=steps.find(s=>s.name==='Retain exact main builder OCI without rebuilding'),upload=steps.find(s=>s.id==='retained_builder'),reference=steps.find(s=>s.name==='Bind main builder artifact to quality evidence');
   const mainOnly="${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}";
   assert.equal(retain.if,mainOnly);assert.equal(upload.if,mainOnly);assert.equal(reference.if,"${{ steps.retained_builder.outcome == 'success' }}");
-  assert(retain.run.includes('docker-daemon:zevyrn-ci-builder:latest'));assert(retain.run.includes('retain-builder')&&retain.run.includes('$RUNNER_TEMP/builder.tar'));assert(!/buildx|docker build/.test(retain.run));
+  assert(retain.run.includes('retain-builder')&&retain.run.includes('$RUNNER_TEMP/builder.tar'));assert(!/buildx|docker build|skopeo copy/.test(retain.run));
+  const build=steps.find(s=>s.id==='images').run;
+  assert(build.includes('--target build --provenance=false --output "type=oci,dest=$RUNNER_TEMP/retained-builder/builder.oci.tar"'));
+  assert(build.includes('"oci-archive:$RUNNER_TEMP/retained-builder/builder.oci.tar" docker-daemon:zevyrn-ci-builder:latest'));
+  for(const [before,after] of [['inspect-builder','skopeo copy'],['skopeo copy','builder-loaded'],['builder-loaded','docker save -o "$RUNNER_TEMP/builder.tar"']])assert(build.indexOf(before)<build.indexOf(after));
+  const diagnostics=steps.find(s=>s.with?.name==='security-evidence');assert(diagnostics.with.path.includes('artifacts/security/builder-inspection.json'));
   assert.equal(upload.with.name,'quality-builder-${{ github.run_id }}-${{ github.run_attempt }}');assert.equal(upload.with.path,'${{ runner.temp }}/retained-builder/');assert.equal(upload.with['retention-days'],7);
   assert(steps.indexOf(upload)>steps.findIndex(s=>s.id==='hardening'));assert(steps.indexOf(upload)>steps.findIndex(s=>s.id==='security'));assert(steps.indexOf(upload)>steps.findIndex(s=>s.id==='quality_record'));
   assert(reference.run.includes('builder-reference.json'));assert(reference.run.includes('quality-record'));assert(steps.indexOf(reference)<steps.findIndex(s=>s.id==='packet'));
   assert(!JSON.stringify(w.jobs.browser).includes('quality-builder-'));assert.equal(steps.find(s=>s.id==='packet').with.path,'artifacts/security/');
+});
+
+test('builder export shell selects one build per role and preserves the PR path (recording stubs, no Engine)', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),w=yaml.parse(await read('.github/workflows/quality-security.yml')),script=w.jobs['quality-image'].steps.find(s=>s.id==='images').run;
+  const conditional=script.match(/if \[\[ "\$GITHUB_REF"[\s\S]*?\nfi\n/)?.[0];assert(conditional);
+  const runtime=script.split('\n').find(line=>line.startsWith('docker buildx build --platform linux/amd64 --provenance=mode=min'));assert(runtime);
+  const directory=await mkdtemp(join(tmpdir(),'zevyrn-builder-control-')),calls=join(directory,'calls.txt');
+  const shell=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'/bin/bash';
+  const functions='record() { printf "%s" "$1" >> "$CALLS_FILE"; shift; printf " <%s>" "$@" >> "$CALLS_FILE"; printf "\\n" >> "$CALLS_FILE"; }\ndocker() { record docker "$@"; }\nskopeo() { record skopeo "$@"; }\nnode() { record node "$@"; }\nmkdir() { record mkdir "$@"; }\n';
+  try{
+    for(const [ref,event,canonical] of [['refs/heads/main','push',true],['refs/heads/main','workflow_dispatch',true],['refs/pull/5/merge','pull_request',false],['refs/heads/main','schedule',false],['refs/heads/feature','workflow_dispatch',false]]){
+      await writeFile(calls,'');
+      const r=spawnSync(shell,['-e','-u','-o','pipefail','-c',functions+conditional+runtime],{encoding:'utf8',env:{...process.env,GITHUB_REF:ref,GITHUB_EVENT_NAME:event,RUNNER_TEMP:directory.replaceAll('\\','/'),CALLS_FILE:calls.replaceAll('\\','/'),QUALITY_SOURCE:'a'.repeat(40)}});assert.equal(r.status,0,r.stderr);
+      const recorded=await readFile(calls,'utf8'),builds=recorded.split('\n').filter(line=>line.startsWith('docker <buildx> <build>'));assert.equal(builds.length,2,ref+' '+event);
+      assert.equal(builds[0].includes('<--output>'),canonical);assert.equal(builds[0].includes('<--load>'),!canonical);
+      assert.equal(recorded.includes('<inspect-builder>'),canonical);assert.equal(recorded.includes('<builder-loaded>'),canonical);
+      assert(!recorded.includes('docker-daemon:zevyrn-ci-builder:latest> <oci-archive:'));
+    }
+  }finally{await rm(directory,{recursive:true,force:true});}
 });
 
 test('standalone is loopback-only; HTTPS alternatives do not publish the backend', async () => {

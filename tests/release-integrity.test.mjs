@@ -7,7 +7,7 @@ import {mkdtempSync,writeFileSync,readFileSync,existsSync,mkdirSync,renameSync,s
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {qualityIdentity,validateQualityArtifact,validateQualityRecord,validateQualitySecurity,validateQualityBrowser,inspectArchive,qualityZip,releaseFreshness,combinedEntry,selectQualityRun,authenticateMainQuality,inspectBuilderGraph,inspectBuilderArchive,validateBuilderBinding,validateCombinedPhase,validateReleaseReceipt,validateVersionCollision,authenticatePackets,combinedSecurity,snapshot} from '../scripts/release-integrity.mjs';
+import {qualityIdentity,validateQualityArtifact,validateQualityRecord,validateQualitySecurity,validateQualityBrowser,inspectArchive,qualityZip,releaseFreshness,combinedEntry,selectQualityRun,authenticateMainQuality,inspectBuilderGraph,inspectBuilderArchive,verifyBuilderLoaded,builderDiagnostic,validateBuilderBinding,validateCombinedPhase,validateReleaseReceipt,validateVersionCollision,authenticatePackets,combinedSecurity,snapshot} from '../scripts/release-integrity.mjs';
 import {hash,inspectDockerGraph,inspectDockerArchive,validateScanIdentity,validateRuntimeReportIdentity,validateSBOMIdentity,validateCompleteScanEvidence,runtimeScanArgs,sanitizedFailureStages,sanitizedScannerMetadata,sanitizedScanSummary,assetSnapshot,validateRuntimeAssets,verifyRetainedAssets,nginxAssetSHA256,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
@@ -277,18 +277,50 @@ test('existing version collision always stops, including when a different digest
   validateVersionCollision({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.2']});
   assert.throws(()=>validateVersionCollision({Repository:'ghcr.io/thestateofwhere/zevyrn',Tags:['1.2.3']}),/already exists/);
 });
-function builderGraphFixture(change=()=>{}){
-  const layer=Buffer.from('builder filesystem fixture'),c={os:'linux',architecture:'amd64',config:{User:'',Env:['NODE_VERSION=24.22.1']},rootfs:{type:'layers',diff_ids:['sha256:'+hash(layer)]}};change(c);
+function builderGraphFixture(change=()=>{},options={}){
+  const layers=options.layers??[Buffer.from('builder filesystem fixture')],layer=layers[0],c={os:'linux',architecture:'amd64',config:{User:'',Env:['NODE_VERSION=24.22.1']},rootfs:{type:'layers',diff_ids:layers.map(bytes=>'sha256:'+hash(bytes))}};change(c);
   const members=new Map(),store=(bytes,mediaType)=>{bytes=Buffer.isBuffer(bytes)?bytes:Buffer.from(JSON.stringify(bytes));const descriptor={mediaType,digest:'sha256:'+hash(bytes),size:bytes.length};members.set('blobs/sha256/'+descriptor.digest.slice(7),bytes);return descriptor;};
-  const m={schemaVersion:2,mediaType:mt,config:store(c,ct),layers:[store(gzipSync(layer),'application/vnd.oci.image.layer.v1.tar+gzip')]};
-  members.set('index.json',Buffer.from(JSON.stringify({schemaVersion:2,manifests:[store(m,mt)]})));members.set('oci-layout',Buffer.from('{"imageLayoutVersion":"1.0.0"}'));
-  return {members,config:c,layer,check:()=>inspectBuilderGraph(name=>members.get(name),[...members.keys()])};
+  const m={schemaVersion:2,mediaType:mt,config:store(c,ct),layers:layers.map(bytes=>store(gzipSync(bytes),'application/vnd.oci.image.layer.v1.tar+gzip'))};
+  let descriptor={...store(m,mt),platform:{os:'linux',architecture:'amd64'}};if(options.wrapped)descriptor=store({schemaVersion:2,mediaType:it,manifests:[descriptor]},it);
+  members.set('index.json',Buffer.from(JSON.stringify({schemaVersion:2,manifests:[descriptor]})));members.set('oci-layout',Buffer.from('{"imageLayoutVersion":"1.0.0"}'));
+  return {members,config:c,layer,layers,check:()=>inspectBuilderGraph(name=>members.get(name),[...members.keys()])};
 }
 test('builder OCI verification authenticates actual config and decompressed layers without relaxing runtime rules',()=>{
   const f=builderGraphFixture(),identity=f.check();assert.equal(identity.config.config.User,'');assert.throws(()=>validateConfig(identity.config,source));
   for(const change of [c=>c.architecture='arm64',c=>c.os='windows',c=>c.rootfs.diff_ids=[sha]])assert.throws(()=>builderGraphFixture(change).check());
   const corrupt=builderGraphFixture();corrupt.members.set('blobs/sha256/'+corrupt.check().configDigest.slice(7),Buffer.from('{}'));assert.throws(corrupt.check);
   const orphan=builderGraphFixture();orphan.members.set('blobs/sha256/'+'f'.repeat(64),Buffer.from('extra'));assert.throws(orphan.check);
+});
+function builderDockerFixture(f,compressed=false,configBytes=Buffer.from(JSON.stringify(f.config))){
+  const identity=f.check(),names=f.layers.map((_,i)=>'layer-'+i+'.tar');
+  const files=new Map([['manifest.json',Buffer.from(JSON.stringify([{Config:'config.json',Layers:names,RepoTags:null}]))],['config.json',configBytes],...names.map((name,i)=>[name,compressed?gzipSync(f.layers[i]):f.layers[i]])]);
+  return {identity,files,check:()=>inspectDockerGraph(name=>files.get(name),[...files.keys()],identity,'builder')};
+}
+test('canonical flat and Buildx-wrapped builder OCI preserve config/index identity and ordered DiffIDs (synthetic archives)',()=>{
+  for(const wrapped of [false,true])for(const compressed of [false,true]){
+    const f=builderGraphFixture(()=>{},{wrapped,layers:[Buffer.from('base layer'),Buffer.from('application layer')]}),d=builderDockerFixture(f,compressed),i=d.identity;
+    assert.equal(i.indexDigest,'sha256:'+hash(f.members.get('index.json')));assert.equal(d.check(),i.configDigest);
+    const loaded={Id:i.configDigest,Os:'linux',Architecture:'amd64',RootFS:{Layers:i.diffIDs},Config:{...f.config.config,OnBuild:null,Labels:null}};
+    verifyBuilderLoaded(i,loaded);
+    for(const change of [x=>x.Id=sha,x=>x.Architecture='arm64',x=>x.Os='windows',x=>x.RootFS.Layers=[...i.diffIDs].reverse(),x=>x.Config.Env=['changed']]){const x=clone(loaded);change(x);assert.throws(()=>verifyBuilderLoaded(i,x));}
+  }
+});
+test('configuration reserialization remains rejected even for semantically identical JSON; diagnostics contain only digests',()=>{
+  const f=builderGraphFixture(),pretty=Buffer.from(JSON.stringify(f.config,null,2)),d=builderDockerFixture(f,false,pretty);assert.deepEqual(JSON.parse(pretty),f.config);assert.notEqual(hash(pretty),d.identity.configDigest.slice(7));
+  let failure;assert.throws(d.check,error=>{failure=error;return diagnosticCode(error)==='BUILDER_CONFIG_DIGEST_MISMATCH';});
+  assert.deepEqual(builderDiagnostic(failure,'scan-archive'),{schemaVersion:1,promotionEligible:false,stage:'builder-scan-archive',result:'failure',code:'BUILDER_CONFIG_DIGEST_MISMATCH',category:'configuration-digest',expectedDigest:d.identity.configDigest,observedDigest:'sha256:'+hash(pretty)});
+  const original='sha256:c5aad5839dadeaab0ff80be03768bb1b96d93beecb52551fd002ddb6d4434961',converted='sha256:187aba7563db19871e734a2c3618de72698046720c5caf97a7be3109bf732ee3';
+  assert.throws(()=>verifyBuilderLoaded({...d.identity,configDigest:original},{Id:converted}),error=>diagnosticCode(error)==='BUILDER_CONFIG_DIGEST_MISMATCH');
+  assert.throws(()=>verifyBuilderLoaded(d.identity,{Id:'TOKEN=fixture-secret'}),error=>{assert.equal(builderDiagnostic(error,'loaded-image').observedDigest,null);assert(!JSON.stringify(builderDiagnostic(error,'loaded-image')).includes('fixture-secret'));return true;});
+  assert(!JSON.stringify(builderDiagnostic(Object.assign(new Error('TOKEN=fixture-secret'),{code:'spoof'}),'oci-export')).includes('fixture-secret'));
+});
+test('builder conversion rejects substituted config bytes, changed/reordered layers and false platform descriptors',()=>{
+  for(const mutate of [d=>d.files.set('config.json',Buffer.from('{}')),d=>d.files.set('layer-0.tar',Buffer.from('altered')),d=>d.files.set('manifest.json',Buffer.from(JSON.stringify([{Config:'config.json',Layers:['layer-1.tar','layer-0.tar']}]))),d=>d.files.delete('config.json')]){
+    const d=builderDockerFixture(builderGraphFixture(()=>{},{layers:[Buffer.from('one'),Buffer.from('two')]}));mutate(d);assert.throws(d.check);
+  }
+  const wrong=builderGraphFixture(),index=JSON.parse(wrong.members.get('index.json'));index.manifests[0].platform.architecture='arm64';wrong.members.set('index.json',Buffer.from(JSON.stringify(index)));assert.throws(wrong.check);
+  const malformed=builderGraphFixture(),broken=JSON.parse(malformed.members.get('index.json'));broken.manifests=[];malformed.members.set('index.json',Buffer.from(JSON.stringify(broken)));assert.throws(malformed.check);
+  for(const mediaType of [null,false,'','unsupported']){const f=builderGraphFixture(),index=JSON.parse(f.members.get('index.json'));index.mediaType=mediaType;f.members.set('index.json',Buffer.from(JSON.stringify(index)));assert.throws(f.check);}
 });
 test('main builder retention command verifies actual OCI against the exact original scanned Docker-save bytes',{skip:!existsSync('.github/workflows/quality-security.yml')&&'Requires a Git source checkout'},async()=>{
   const root=mkdtempSync(join(tmpdir(),'zevyrn-retain-builder-')),members=join(root,'members'),retained=join(root,'retained'),docker=join(root,'docker');for(const dir of [members,retained,docker])mkdirSync(dir);
@@ -298,12 +330,26 @@ test('main builder retention command verifies actual OCI against the exact origi
   assert.equal(spawnSync('tar',['-cf',scan,'-C',docker,'config.json','layer.tar','manifest.json'],{encoding:'utf8'}).status,0);
   const actualSource=spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(),event=join(root,'event.json');writeFileSync(event,JSON.stringify({repository:{id:repositoryId}}));
   const env={...process.env,QUALITY_SOURCE:actualSource,GITHUB_SHA:actualSource,GITHUB_REPOSITORY:repository,GITHUB_EVENT_NAME:'push',GITHUB_REF:'refs/heads/main',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/quality-security.yml@refs/heads/main`,GITHUB_RUN_ID:'42',GITHUB_RUN_ATTEMPT:'2',GITHUB_EVENT_PATH:event};
+  const retain=()=>spawnSync(process.execPath,['scripts/release-integrity.mjs','retain-builder',archive,scan,retained],{env,encoding:'utf8'});
+  assert.equal(retain().status,1);assert(!existsSync(join(retained,'quality.json')),'Missing authoritative evidence must fail before sealing');
+  const inspected=spawnSync(process.execPath,['scripts/release-integrity.mjs','inspect-builder',archive,join(retained,'builder-identity.json')],{env,encoding:'utf8'});assert.equal(inspected.status,0,inspected.stderr);
+  const authoritative=JSON.parse(readFileSync(join(retained,'builder-identity.json'))),loaded=join(root,'loaded.json'),diagnostic=join(root,'builder-diagnostic.json');
+  for(const invalid of [{},{...authoritative,archiveSHA256:'e'.repeat(64)}]){writeFileSync(join(retained,'builder-identity.json'),JSON.stringify(invalid));const rejected=retain();assert.equal(rejected.status,1);assert.equal(rejected.stderr.trim(),'BUILDER_SCAN_ARCHIVE_INVALID');assert(!existsSync(join(retained,'quality.json')));}
+  writeFileSync(join(retained,'builder-identity.json'),JSON.stringify(authoritative));
+  writeFileSync(loaded,JSON.stringify([{Id:authoritative.configDigest,Os:'linux',Architecture:'amd64',RootFS:{Layers:authoritative.diffIDs},Config:f.config.config}]));
+  const loadedCheck=()=>spawnSync(process.execPath,['scripts/release-integrity.mjs','builder-loaded',join(retained,'builder-identity.json'),loaded,diagnostic],{env,encoding:'utf8'});
+  assert.equal(loadedCheck().status,0);assert.equal(JSON.parse(readFileSync(diagnostic)).result,'success');
   const result=spawnSync(process.execPath,['scripts/release-integrity.mjs','retain-builder',archive,scan,retained],{env,encoding:'utf8'});assert.equal(result.status,0,result.stderr);
   const identity=JSON.parse(readFileSync(join(retained,'builder-identity.json')));assert.equal(identity.scanArchiveSHA256,hash(readFileSync(scan)));
   const raw=join(root,'report.json');writeFileSync(raw,JSON.stringify({SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:identity.configDigest,DiffIDs:identity.diffIDs}}));
   const check=()=>spawnSync(process.execPath,['scripts/release-integrity.mjs','builder-scan-binding',join(retained,'builder-identity.json'),scan,raw],{encoding:'utf8'});
   assert.equal(check().status,0);writeFileSync(raw,JSON.stringify({SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:sha,DiffIDs:identity.diffIDs}}));assert.equal(check().status,1);
-  writeFileSync(scan,Buffer.from('changed scanned archive'));assert.equal(check().status,1);
+  writeFileSync(raw,JSON.stringify({SchemaVersion:2,ArtifactType:'container_image',Metadata:{ImageID:identity.configDigest,DiffIDs:identity.diffIDs}}));
+  writeFileSync(scan,Buffer.from('changed scanned archive'));const checksumFailure=check();assert.equal(checksumFailure.status,1);assert.equal(checksumFailure.stderr.trim(),'BUILDER_SCAN_REPORT_INVALID');
+  // Real CLI diagnostic path, but simulated inspection data; no Engine is used.
+  writeFileSync(loaded,JSON.stringify([{Id:'TOKEN=fixture-secret'}]));const rejected=loadedCheck();assert.equal(rejected.status,1);assert(rejected.stderr.includes('BUILDER_CONFIG_DIGEST_MISMATCH'));assert(!rejected.stderr.includes('fixture-secret'));assert.equal(JSON.parse(readFileSync(diagnostic)).observedDigest,null);
+  writeFileSync(loaded,JSON.stringify([{Id:authoritative.configDigest,Os:'linux',Architecture:'amd64',RootFS:{Layers:authoritative.diffIDs},Config:f.config.config}]));
+  const missing=join(root,'missing-builder.json');const noEvidence=spawnSync(process.execPath,['scripts/release-integrity.mjs','builder-loaded',missing,loaded,diagnostic],{env,encoding:'utf8'});assert.equal(noEvidence.status,1);assert.equal(JSON.parse(readFileSync(diagnostic)).code,'BUILDER_LOADED_IDENTITY_INVALID');
 });
 test('fresh combined security accepts zero approved findings and rejects unauthorized findings and missing config-secret coverage',async()=>{
   const directory=mkdtempSync(join(tmpdir(),'zevyrn-combined-security-'));mkdirSync(join(directory,'builder'));
@@ -422,7 +468,7 @@ test('candidate quality validation checks pinned base, patched packages and hard
     if(job.permissions)assert.deepEqual(job.permissions,{contents:'read',actions:'read'});
     for(const step of job.steps){
       assert(!/docker (?:push|login)|--push|skopeo login|gh (?:workflow run|release)|ssh\s/.test(step.run??''));
-      for(const line of (step.run??'').split('\n').filter(line=>line.includes('skopeo copy')))assert.match(line,/(?:oci-archive:artifacts\/security\/archive\.oci\.tar docker-daemon:zevyrn-ci-runtime:latest|docker-daemon:zevyrn-ci-builder:latest "oci-archive:\$RUNNER_TEMP\/retained-builder\/builder\.oci\.tar")$/);
+      for(const line of (step.run??'').split('\n').filter(line=>line.includes('skopeo copy')))assert.match(line,/(?:oci-archive:artifacts\/security\/archive\.oci\.tar docker-daemon:zevyrn-ci-runtime:latest|"oci-archive:\$RUNNER_TEMP\/retained-builder\/builder\.oci\.tar" docker-daemon:zevyrn-ci-builder:latest)$/);
     }
   }
   for(const publisher of ['publish-qualified-image','publish-maintenance-image'])assert.deepEqual(Object.keys(yaml.parse(readFileSync(`.github/workflows/${publisher}.yml`,'utf8')).on),['workflow_dispatch']);

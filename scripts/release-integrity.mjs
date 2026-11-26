@@ -25,9 +25,25 @@ const same=(a,b)=>assert.deepEqual(a,b);
 const sha=value=>assert(digest.test(value),'Invalid digest');
 const commit=value=>assert(/^[0-9a-f]{40}$/.test(value),'Invalid commit/tree');
 const failureCodes=new WeakMap();
+const builderFailureDetails=new WeakMap();
 const codes=new Set(['OCI_LAYOUT_INVALID','OCI_RUNTIME_DESCRIPTOR_INVALID','OCI_RUNTIME_CONFIG_INVALID','OCI_ATTESTATION_DESCRIPTOR_INVALID','OCI_ATTESTATION_CONFIG_INVALID','OCI_PROVENANCE_INVALID','OCI_PROVENANCE_SUBJECT_INVALID','OCI_BLOB_DIGEST_MISMATCH','OCI_ARCHIVE_READ_INVALID','OCI_INSPECTION_OUTPUT_INVALID','SOURCE_IDENTITY_INVALID','RELEASE_INTEGRITY_UNEXPECTED']);
 function stage(code,operation){try{return operation();}catch(error){if(failureCodes.has(error))throw error;const failure=new Error();failureCodes.set(failure,code);throw failure;}}
 export const diagnosticCode=error=>failureCodes.get(error)??'RELEASE_INTEGRITY_UNEXPECTED';
+for(const code of ['BUILDER_OCI_INVALID','BUILDER_LOADED_IDENTITY_INVALID','BUILDER_SCAN_ARCHIVE_INVALID','BUILDER_SCAN_REPORT_INVALID','BUILDER_CONFIG_DIGEST_MISMATCH'])codes.add(code);
+function builderConfigDigest(expected,observed){
+  sha(expected);if(expected===observed)return;
+  const error=new Error();failureCodes.set(error,'BUILDER_CONFIG_DIGEST_MISMATCH');
+  builderFailureDetails.set(error,{category:'configuration-digest',expectedDigest:expected,observedDigest:typeof observed==='string'&&digest.test(observed)?observed:null});throw error;
+}
+export function builderDiagnostic(error,phase){
+  assert(['oci-export','loaded-image','scan-archive','scan-report'].includes(phase));
+  return {schemaVersion:1,promotionEligible:false,stage:'builder-'+phase,result:error?'failure':'success',code:error?diagnosticCode(error):'OK',...(builderFailureDetails.get(error)??{})};
+}
+async function builderCheck(phase,output,operation){
+  const code={'oci-export':'BUILDER_OCI_INVALID','loaded-image':'BUILDER_LOADED_IDENTITY_INVALID','scan-archive':'BUILDER_SCAN_ARCHIVE_INVALID','scan-report':'BUILDER_SCAN_REPORT_INVALID'}[phase];
+  try{const result=await stageAsync(code,operation);if(output)await writeJSON(output,builderDiagnostic(null,phase));return result;}
+  catch(error){if(output)await writeJSON(output,builderDiagnostic(error,phase));throw error;}
+}
 export function inspectionDiagnostic(code){assert(code==='OK'||codes.has(code));return {schemaVersion:1,promotionEligible:false,stage:'archive-inspection',result:code==='OK'?'success':'failure',code};}
 for(const code of ['SCAN_ARCHIVE_INVALID','RUNTIME_SCAN_FAILED','SBOM_GENERATION_FAILED'])codes.add(code);
 export function sanitizedFailureStages(input){
@@ -197,7 +213,9 @@ export function inspectDockerGraph(read,names,identity,role='runtime'){
   const seen=new Set();for(const name of names){const path=name.endsWith('/')?name.slice(0,-1):name;safeAssetPath(path);assert(!seen.has(name));seen.add(name);}
   const manifests=json(read('manifest.json'));assert(Array.isArray(manifests)&&manifests.length===1);
   const manifest=manifests[0];safeAssetPath(manifest.Config);assert(seen.has(manifest.Config));
-  const bytes=read(manifest.Config);assert('sha256:'+hash(bytes)===identity.configDigest);
+  const bytes=read(manifest.Config);
+  if(role==='builder')builderConfigDigest(identity.configDigest,'sha256:'+hash(bytes));
+  else assert('sha256:'+hash(bytes)===identity.configDigest);
   const config=json(bytes);same(config,identity.config);
   if(role==='runtime')validateConfig(config,identity.sourceCommit);
   else assert(config.os==='linux'&&config.architecture==='amd64'&&config.rootfs.type==='layers');
@@ -594,9 +612,16 @@ export function authenticateMainQuality(info,jobs,artifacts,workflow,sourceInfo,
 export function inspectBuilderGraph(read,names){
   const seen=new Set(),used=new Set();for(const name of names){assert(/^(?:index\.json|oci-layout|blobs\/?|blobs\/sha256\/?|blobs\/sha256\/[0-9a-f]{64})$/.test(name)&&!seen.has(name),'Invalid builder OCI member');seen.add(name);}
   same(json(read('oci-layout')),{'imageLayoutVersion':'1.0.0'});
-  const blob=d=>{sha(d.digest);const name='blobs/sha256/'+d.digest.slice(7),bytes=read(name);assert(bytes.length===d.size&&'sha256:'+hash(bytes)===d.digest);used.add(name);return bytes;};
-  const indexBytes=read('index.json'),index=json(indexBytes);assert(index.schemaVersion===2&&index.manifests.length===1);
-  const d=index.manifests[0];assert(d.mediaType===manifestType);const m=json(blob(d));
+  const blob=d=>{sha(d.digest);assert(Number.isSafeInteger(d.size)&&d.size>0);const name='blobs/sha256/'+d.digest.slice(7),bytes=read(name);assert(bytes.length===d.size&&'sha256:'+hash(bytes)===d.digest);used.add(name);return bytes;};
+  const indexBytes=read('index.json');let index=json(indexBytes);
+  const singleIndex=value=>assert(value.schemaVersion===2&&(value.mediaType===undefined||value.mediaType===indexType)&&Array.isArray(value.manifests)&&value.manifests.length===1);
+  singleIndex(index);
+  // Buildx may wrap its single-platform index in the OCI layout's index.json.
+  // Keep the original outer index digest; authenticate every nested blob too.
+  if(index.manifests[0].mediaType===indexType){index=json(blob(index.manifests[0]));singleIndex(index);}
+  const d=index.manifests[0];assert(d.mediaType===manifestType);
+  if(d.platform)assert(d.platform.os==='linux'&&d.platform.architecture==='amd64'&&!d.platform.variant);
+  const m=json(blob(d));
   assert(m.schemaVersion===2&&m.config.mediaType===configType&&m.layers.length>0);
   const c=json(blob(m.config));assert(c.os==='linux'&&c.architecture==='amd64'&&c.rootfs.type==='layers');
   const diffIDs=m.layers.map(layer=>{assert(['application/vnd.oci.image.layer.v1.tar+gzip','application/vnd.oci.image.layer.v1.tar'].includes(layer.mediaType));const bytes=blob(layer);return 'sha256:'+hash(layer.mediaType.endsWith('+gzip')?gunzipSync(bytes):bytes);});
@@ -606,6 +631,14 @@ export function inspectBuilderGraph(read,names){
 export async function inspectBuilderArchive(path){
   const names=run('tar',['-tf',path]).toString().trim().split(/\r?\n/);
   return {...inspectBuilderGraph(name=>run('tar',['-xOf',path,name]),names),archiveSHA256:hash(await readFile(path))};
+}
+export function verifyBuilderLoaded(identity,image){
+  assert(identity.config.os==='linux'&&identity.config.architecture==='amd64');
+  builderConfigDigest(identity.configDigest,image.Id);
+  assert(image.Os==='linux'&&image.Architecture==='amd64');same(image.RootFS.Layers,identity.diffIDs);
+  // Docker inspection can add default/null fields. The exact config digest is
+  // mandatory; defaults never justify accepting different configuration bytes.
+  for(const [key,value] of Object.entries(identity.config.config))same(image.Config[key],value);
 }
 export function validateBuilderBinding(identity,reference,selection,summary){
   assert(identity.sourceCommit===selection.sourceCommit&&identity.sourceTree===selection.sourceTree);
@@ -732,23 +765,32 @@ async function combinedRevalidate(root){
 }
 async function main() {
   const [mode,...args]=process.argv.slice(2);
-  if(mode==='retain-builder'){
-    const [oci,scan,directory]=args,ctx=context();assert(ctx.purpose==='quality'&&process.env.GITHUB_REF==='refs/heads/main');
-    const inspected=await inspectBuilderArchive(oci),identity={...inspected,scanArchiveSHA256:hash(await readFile(scan)),sourceCommit:ctx.sourceCommit,sourceTree:ctx.sourceTree,runId:ctx.runId,runAttempt:ctx.runAttempt};
+  const builderContext=()=>{const ctx=context();assert(ctx.purpose==='quality'&&process.env.GITHUB_REF==='refs/heads/main'&&['push','workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME));return ctx;};
+  if(mode==='inspect-builder')await builderCheck('oci-export',args[2],async()=>{
+    const ctx=builderContext(),inspected=await inspectBuilderArchive(args[0]);
+    await writeJSON(args[1],{...inspected,sourceCommit:ctx.sourceCommit,sourceTree:ctx.sourceTree,runId:ctx.runId,runAttempt:ctx.runAttempt});
+  });
+  else if(mode==='builder-loaded')await builderCheck('loaded-image',args[2],async()=>{
+    const identity=await readJSON(args[0]),images=await readJSON(args[1]);assert(images.length===1);verifyBuilderLoaded(identity,images[0]);
+  });
+  else if(mode==='retain-builder')await builderCheck('scan-archive',args[3],async()=>{
+    const [oci,scan,directory]=args,ctx=builderContext();
+    const inspected=await inspectBuilderArchive(oci),original={...inspected,sourceCommit:ctx.sourceCommit,sourceTree:ctx.sourceTree,runId:ctx.runId,runAttempt:ctx.runAttempt};
+    same(await readJSON(resolve(directory,'builder-identity.json')),original);
     const names=run('tar',['-tf',scan]).toString().trim().split(/\r?\n/);
-    inspectDockerGraph(name=>run('tar',['-xOf',scan,name]),names,identity,'builder');
-    await writeJSON(resolve(directory,'builder-identity.json'),identity);
+    inspectDockerGraph(name=>run('tar',['-xOf',scan,name]),names,original,'builder');
+    await writeJSON(resolve(directory,'builder-identity.json'),{...original,scanArchiveSHA256:hash(await readFile(scan))});
     await writeJSON(resolve(directory,'quality.json'),{schemaVersion:1,purpose:'quality',promotionEligible:false,files:await snapshot(directory)});
-  }
+  });
   else if(mode==='builder-reference'){
     const identity=await readJSON(args[0]),id=Number(args[1]);positive(id);sha(args[2]);
     const ctx=context();assert(identity.sourceCommit===ctx.sourceCommit&&identity.sourceTree===ctx.sourceTree&&identity.runId===ctx.runId&&identity.runAttempt===ctx.runAttempt);
     await writeJSON(args[3],{identity,artifact:{id,name:`quality-builder-${ctx.runId}-${ctx.runAttempt}`,digest:args[2]}});
   }
-  else if(mode==='builder-scan-binding'){
+  else if(mode==='builder-scan-binding')await builderCheck('scan-report',args[3],async()=>{
     const identity=await readJSON(args[0]);assert(hash(await readFile(args[1]))===identity.scanArchiveSHA256,'Builder scan archive changed');
-    validateRuntimeReportIdentity(identity,await readJSON(args[2]));
-  }
+    const report=await readJSON(args[2]);builderConfigDigest(identity.configDigest,report.Metadata?.ImageID);validateRuntimeReportIdentity(identity,report);
+  });
   else if(mode==='combined-resolve')await combinedResolve(args[0]);
   else if(mode==='combined-fetch')await combinedFetch(args[0],args[1]);
   else if(mode==='combined-seal'){
@@ -886,6 +928,7 @@ const combinedFailureHints={
 const publicReleaseErrors=new Set(['Live tag publication is disabled pending separate authorization','Reused main evidence expired: explicitly refresh main quality','Selected main quality evidence expired','Approval exceeded promotion database freshness: new qualification and approval required','Release database predates this release attempt','Source metadata does not match release guard','No exact-source main push quality run; do not substitute another source',...['runtime','builder','browser'].map(role=>`Missing or ambiguous ${role} artifact: run current main quality explicitly`)]);
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{
   console.error(diagnosticCode(error));
+  if(builderFailureDetails.has(error))console.error(JSON.stringify(builderFailureDetails.get(error)));
   const hint=combinedFailureHints[process.argv[2]];
   if(hint){console.error(hint);if(publicReleaseErrors.has(error.message))console.error(error.message);}
   process.exitCode=1;
