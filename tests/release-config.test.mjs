@@ -11,6 +11,36 @@ import { createRequire } from 'node:module';
 import { screenshotDirectory } from './browser-artifacts.mjs';
 const read = name => readFile(new URL('../'+name, import.meta.url), 'utf8');
 
+test('Dependabot checks exactly three root ecosystems weekly and excludes only historical workflow paths', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Dependabot contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+  const config=yaml.parse(await read('.github/dependabot.yml'));
+  assert.deepEqual(Object.keys(config).sort(),['updates','version']);assert.equal(config.version,2);
+  assert(Array.isArray(config.updates));assert.equal(config.updates.length,3);
+  assert.deepEqual(config.updates.map(update=>update['package-ecosystem']).sort(),['docker','github-actions','npm']);
+  for(const update of config.updates){
+    const keys=['directory','package-ecosystem','schedule'];if(update['package-ecosystem']==='github-actions')keys.push('exclude-paths');
+    // No groups, dependency-name ignores, credentials, custom update hooks or alternate targets.
+    assert.deepEqual(Object.keys(update).sort(),keys.sort());
+    assert.equal(update.directory,'/');assert.deepEqual(update.schedule,{interval:'weekly'});
+  }
+  const actions=config.updates.find(update=>update['package-ecosystem']==='github-actions');
+  const historical=['.github/workflows/ghcr-readonly-diagnostic.yml','.github/workflows/publish-qualified-image.yml'];
+  assert.deepEqual([...actions['exclude-paths']].sort(),historical);
+  // These are literal paths relative to directory '/', not action-name ignores or globs.
+  const excluded=new Set(actions['exclude-paths']);
+  const workflows=(await readdir(new URL('../.github/workflows/',import.meta.url))).filter(file=>/\.ya?ml$/.test(file)).map(file=>'.github/workflows/'+file);
+  assert.deepEqual(workflows.filter(path=>excluded.has(path)).sort(),historical);
+  assert.deepEqual(workflows.filter(path=>!excluded.has(path)).sort(),['.github/workflows/quality-security.yml','.github/workflows/release.yml']);
+  const uses=async path=>{
+    const workflow=yaml.parse(await read(path));
+    return Object.values(workflow.jobs).flatMap(job=>job.steps.flatMap(step=>step.uses?[step.uses]:[]));
+  };
+  const maintained=(await Promise.all(workflows.filter(path=>!excluded.has(path)).map(uses))).flat();
+  assert(maintained.length>0);assert(maintained.every(action=>/^[^@]+@[0-9a-f]{40}$/.test(action)));
+  const historicalUses=(await Promise.all(historical.map(uses))).flat();
+  assert(maintained.some(action=>historicalUses.includes(action)),'Shared actions remain eligible in maintained files');
+});
+
 test('quality retains exact image/browser coverage with read-only fork-safe artifact transport', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
   const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
   const workflow=yaml.parse(await read('.github/workflows/quality-security.yml'));
