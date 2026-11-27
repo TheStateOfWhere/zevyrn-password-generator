@@ -40,29 +40,25 @@ around errors, or commit secrets and certificate keys.
 
 ## Published release qualification
 
-The existing v1.2.4 [qualification workflow](.github/workflows/qualify-maintenance-image.yml)
-binds source commit/tree, an exact Linux/amd64 OCI archive, runtime assets,
-builder/runtime vulnerability and secret scans, image-configuration secret scans,
-runtime SBOM, hardened runtime checks and eight Microsoft Edge browser suites.
-The [protected publication workflow](.github/workflows/publish-maintenance-image.yml)
-verifies the retained evidence, performs fresh runtime scanning and promotes the
-same OCI archive without rebuilding it. See [release notes](RELEASE-NOTES.md)
-for published historical records. v1.2.3 publication is accepted. Its actual
-anonymous Docker Engine pull remains deferred, not passed and nonblocking for
-development. PR-only artifacts are not eligible for publication.
+The [combined release workflow](.github/workflows/release.yml) qualified and
+published v1.2.4 through protected owner approval. It authenticates exact-source
+main quality artifacts, including OCI bytes, runtime assets, builder/runtime
+scans, configuration secret checks, SBOM, licenses, hardened execution and all
+eight archive-bound Edge suites. It freshly scans both retained images and
+creates a separate release-purpose receipt; original quality and PR records
+remain non-promotable. Manual verification on main has no publication authority.
 
-The [combined release workflow](.github/workflows/release.yml) is a replacement
-prepared for v1.2.4 source activation, with exact-version tag and release-purpose
-qualification gates. Local preparation does not authorize a tag or publication. Its manual
-main verification path has no protected-environment or registry-write authority.
-It authenticates retained main runtime/builder artifacts and archive-bound browser
-evidence, freshly scans both images, and creates a separate receipt without
-making original quality evidence promotable. Activation preserves exact-tag owner approval, revalidation after approval, the 24-hour
-reused-evidence limit and one-hour promotion database freshness. Publication
-preserves the qualified digest; anonymous Docker Engine verification runs on a
-separate runner without publication credentials. Legacy release paths remain
-available during migration. See [release process](docs/RELEASING.md) for artifact
-selection, controlled recovery and replacement-before-retirement requirements.
+Publication revalidates the immutable tag, source and authenticated evidence
+after approval, preserves the 24-hour original-evidence limit and one-hour
+promotion database freshness limit, rejects existing destination versions, and
+copies the exact OCI graph without rebuilding. Registry-write authority is
+confined to the protected publication job. Actual anonymous Docker Engine pulls
+by version and digest run on a separate runner without publication credentials.
+The two superseded maintenance entry points are retired; shared validators and
+historical release records remain. See [release process](docs/RELEASING.md) for
+selection, manual refresh/recovery and Git restoration instructions, and
+[release notes](RELEASE-NOTES.md) for historical records. The v1.2.3 anonymous
+Docker Engine check remains deferred, not passed and nonblocking.
 
 Runtime HIGH/CRITICAL findings or detected secrets block acceptance. Builder
 CRITICAL findings, detected secrets and unapproved HIGH findings also block.
