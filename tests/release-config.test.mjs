@@ -45,31 +45,29 @@ test('quality retains exact image/browser coverage with read-only fork-safe arti
   assert(browserScript.includes('packet/assets'));assert(browserScript.includes('release-integrity.mjs browser packet'));assert(browserScript.includes('quality-browser-result'));
 });
 
-test('qualification is manual-only and preserves exact release source, evidence and publication contracts', {skip:!existsSync('.github/workflows/qualify-maintenance-image.yml')&&'Workflow contracts run on the source checkout'},async()=>{
-  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
-  const qualifier=yaml.parse(await read('.github/workflows/qualify-maintenance-image.yml'));
-  assert.deepEqual(Object.keys(qualifier.on),['workflow_dispatch']);
-  assert.deepEqual(qualifier.on.workflow_dispatch.inputs.source_commit,{description:'Exact approved main commit containing v1.2.4 metadata',required:true,type:'string'});
-  assert.deepEqual(Object.keys(qualifier.jobs).sort(),['browser','runtime','seal']);
-  assert.deepEqual(qualifier.permissions,{contents:'read',actions:'read'});
-  assert.equal(qualifier.concurrency['cancel-in-progress'],false);
-  assert.equal(qualifier.jobs.browser.needs,'runtime');assert.deepEqual(qualifier.jobs.seal.needs,['runtime','browser']);
-  const runtime=qualifier.jobs.runtime.steps;
-  const init=runtime.find(step=>step.id==='init');assert(init.run.includes('release-integrity.mjs qualification-context'));
-  assert(init.run.includes('test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE"'));
-  const prerequisite=runtime.find(step=>step.name==='Require matching successful source CI without a parallel-run race');
-  assert(prerequisite.run.includes('--workflow quality-security.yml --commit "$QUALIFICATION_SOURCE" --event "$QUALITY_EVENT" --branch "$QUALITY_BRANCH"'));
-  assert(prerequisite.run.includes('release-integrity.mjs quality'));
-  assert(qualifier.jobs.seal.steps.some(step=>step.run==='node scripts/release-integrity.mjs seal packet'));
+test('retired maintenance entry points are absent and active manual recovery contracts remain available', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+  const retired=['qualify-maintenance-image.yml','publish-maintenance-image.yml'];
+  for(const file of retired)assert(!existsSync('.github/workflows/'+file),file+' must remain retired');
+  const files=(await readdir(new URL('../.github/workflows/',import.meta.url))).filter(f=>/\.ya?ml$/.test(f)).sort();
+  assert.deepEqual(files,['ghcr-readonly-diagnostic.yml','publish-qualified-image.yml','quality-security.yml','release.yml']);
+  for(const file of files){const text=await read('.github/workflows/'+file);for(const target of retired)assert(!text.includes(target),'Active workflow references '+target);}
+  const guide=await read('docs/RELEASING.md'),security=await read('SECURITY.md');
+  const [active,restoration]=guide.split('### Superseded maintenance workflow retirement');
+  assert(restoration,'Git restoration guidance must remain available');
+  for(const target of retired){assert(!active.includes(target));assert(!security.includes(target));assert(restoration.includes(target));}
   const quality=yaml.parse(await read('.github/workflows/quality-security.yml'));
+  assert(Object.hasOwn(quality.on,'workflow_dispatch'));assert.deepEqual(quality.on.push,{branches:['main']});
   assert(Object.hasOwn(quality.on,'pull_request'));
-  const publisher=yaml.parse(await read('.github/workflows/publish-maintenance-image.yml'));
-  assert.deepEqual(Object.keys(publisher.on),['workflow_dispatch']);
-  assert.equal(publisher.jobs.promote.environment,'zevyrn-ghcr-publication');
-  assert.deepEqual(publisher.jobs.validate.permissions,{contents:'read',actions:'read'});
-  assert.deepEqual(publisher.jobs.promote.permissions,{contents:'read',actions:'read',packages:'write'});
-  const promotion=publisher.jobs.promote.steps.map(step=>step.run??'').join('\n');
-  assert(promotion.includes('age<=3600000'));assert(promotion.includes('--all --preserve-digests'));
+  const release=yaml.parse(await read('.github/workflows/release.yml'));
+  assert.deepEqual(release.on.workflow_dispatch.inputs.quality_run_id,{description:'Exact successful main quality run; no automatic substitution',required:true,type:'string'});
+  const resolve=release.jobs.resolve.steps.find(s=>s.id==='select');
+  assert.equal(resolve.env.QUALITY_RUN_ID,'${{ inputs.quality_run_id }}');
+  assert.equal(resolve.run,'node scripts/release-integrity.mjs combined-resolve selection.json');
+  const seal=release.jobs.qualify.steps.find(s=>s.id==='seal');assert.equal(seal.run,'node scripts/release-integrity.mjs combined-seal qualified');
+  const packet=release.jobs.qualify.steps.find(s=>s.id==='packet');
+  assert.equal(packet.with.path,'qualified/');assert.equal(packet.with['if-no-files-found'],'error');
+  assert.equal(packet.with.name,'release-qualified-${{ github.run_id }}-${{ github.run_attempt }}');
 });
 
 test('combined release isolates manual verification and enables only exact v1.2.4 publication', {skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts run on the source checkout'},async()=>{

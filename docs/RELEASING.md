@@ -47,52 +47,43 @@ Quality records and browser results explicitly have `purpose: quality` and
 artifacts and cannot be supplied to the existing publication workflow.
 
 `quality-security.yml` is the sole automatic PR validation workflow.
-`qualify-maintenance-image.yml` no longer runs on PR events; it remains available
-for explicitly dispatched release-purpose qualification on main. Quality and
-PR evidence remain non-promotable.
+Quality and PR evidence remain non-promotable; release-purpose qualification
+is performed separately by the combined release workflow.
 
 Security failures retain sanitized reports and stage summaries. Raw secret
 matches, snippets and failed-image archives are not uploaded as diagnostics.
 Successful image packets and browser results are retained for seven days.
 
-## Existing maintenance release path
+## Active combined release process
 
-Milestone 1 does not change manual release qualification or protected publication.
-Do not promote a PR or quality packet. Prepare and review coordinated version
-metadata through a PR, then validate the exact merged main source.
+The tag-driven [combined release workflow](../.github/workflows/release.yml)
+successfully released v1.2.4 in
+[run 45944211344, attempt 1](https://github.com/TheStateOfWhere/zevyrn-password-generator/actions/runs/45944211344).
+Source tag `v1.2.4` resolves to `7459eb85141be8f8ac7745fd180ec3a9b71e0e34`
+(tree `27d9df1e244f5f25ac37ea25d0602af97f65c4c3`). The qualified and public
+OCI index is `sha256:936ad9a0f9221475fb7864823ad349319a05b2f166024b5a36f7ec23f729ff76`.
+Actual anonymous Docker tag and digest pulls passed on a separate runner.
+Live runtime health/hardening checks are bound main quality evidence; the
+consumer job pulls and inspects images without starting a container.
 
-1. Dispatch `qualify-maintenance-image.yml` on main with the exact approved
-   `source_commit`. It performs release-purpose qualification and retains the
-   sealed archive and evidence.
-2. Review its successful run and immutable artifact/source identities. Create the
-   exact release tag at the qualified commit only after authorization. Stop on
-   an existing conflicting tag; never overwrite release tags or images.
-3. Authorize only that exact tag in `zevyrn-ghcr-publication`, preserving existing
-   protections. Dispatch `publish-maintenance-image.yml` from the tag with the
-   approved `qualification_run_id`.
-4. Review validation before giving protected owner approval. Publication rechecks
-   source and retained bytes, the 24-hour qualification limit and one-hour
-   promotion database freshness limit. It copies the qualified OCI graph without
-   rebuilding, then verifies the public registry digest and anonymous access.
+Prepare coordinated metadata through a reviewed PR, then require successful
+exact-source main quality. After separate authorization, create the immutable
+version tag and authorize only that exact tag in the existing protected
+environment without altering any other protections. Its tag push invokes the
+combined process below. Review qualification before giving manual owner
+approval; after publication, review the separate anonymous consumer result.
+Never overwrite an existing source tag or image, including the same digest.
 
-Current maintenance guards are version-specific to 1.2.4. The published v1.2.3
-identity remains immutable; these commands are not permission to republish it. Builder-only dispositions remain exact package/version/path
-authorizations, not runtime exceptions or a requirement that findings persist.
+The current activation and publication guards remain specific to v1.2.4, which
+is already published. These instructions do not authorize republishing it or
+publishing a future version. Future version guards require a separate reviewed
+change; dispatch inputs cannot bypass the source-level activation or approval.
+PRs, main pushes and schedules do not invoke the release workflow.
 
-Public source and images remain supported. Running deployments are supported
-only on private/internal networks or localhost. Use the documented Docker and
-Compose installation paths; release validation does not authorize deployment.
-
-## Combined release workflow — v1.2.4 activation candidate
-
-`release.yml` is prepared for v1.2.4 with source-level
-`LIVE_PUBLICATION_ENABLED: 'true'` and the temporary literal-false job gate
-removed. Publication still requires the exact `refs/tags/v1.2.4` ref, the existing
-tag-prefix, resolver-output and event/mode predicates, and successful resolve
-and qualify dependencies. Local preparation does not authorize commit, push,
-merge, tag creation, dispatch or publication. The existing maintenance workflows
-remain available with coordinated v1.2.4 guards; no workflow is retired.
-No PR, main push or schedule invokes the release workflow.
+Public source and images, standard Docker/Compose installation and supported
+build-from-source guidance remain available in [installation](../INSTALLATION.md).
+Running deployments are supported only on private/internal networks or
+localhost. Release validation does not authorize deployment.
 
 Manual dispatch defaults to `operation: verify` and requires an exact
 `quality_run_id`. Verification is accepted only on main and is structurally
@@ -104,8 +95,7 @@ always remain unchanged and non-promotable.
 
 Controlled recovery uses the distinct `operation: release` mode from the exact
 version tag, with an explicit quality run. It is rejected on main, on any other
-tag. After separately authorized integration and release execution,
-it requires the same source, security, freshness and protected owner approval as
+tag. It requires the same source, security, freshness and protected owner approval as
 a tag push. No dispatch input can change the activation lock or bypass approval.
 
 Successful main push and main manual quality runs retain a separate
@@ -127,7 +117,7 @@ Builder identity failures retain a sanitized stage/category and, for configurati
 digest mismatches, only the expected and observed digests. Raw configuration,
 labels and environment values are not included in those diagnostics.
 
-For a future authorized tag release, the combined path:
+For an authorized eligible tag release, the combined path:
 
 1. Resolves the exact version tag/source/tree from reviewed main history. The
    selected quality run must come from this repository and the active reviewed
@@ -162,7 +152,7 @@ For a future authorized tag release, the combined path:
    release scanner database must have been downloaded in this release attempt,
    remain valid, and be at most one hour old at promotion.
 7. Rejects any existing destination version, even one with the same digest.
-   It shares the legacy publisher's version concurrency lane and copies the
+   It retains the fixed version publication concurrency lane and copies the
    exact qualified OCI graph using `--all --preserve-digests`. Existing version
    tags and images are never overwritten.
 8. Runs anonymous verification on a separate Ubuntu runner without checkout,
@@ -177,10 +167,9 @@ failed; do not republish, overwrite or automatically rerun it.
 
 ### Missing or stale evidence and controlled recovery
 
-The accepted Milestone 1 main packet predates separate builder retention and is
-not eligible for this new path. Run the existing quality workflow after this
-implementation is merged; do not rebuild merely to archive an existing image.
-Seven-day artifact retention does not extend the 24-hour eligibility window.
+Main evidence must include the separate authenticated builder OCI retention.
+Older packets without it are ineligible. Seven-day artifact retention does not
+extend the 24-hour eligibility window.
 
 Missing, expired, ambiguous or mismatched evidence stops execution. Review the
 specific source/run/attempt and diagnostics. If the exact approved source is
@@ -188,43 +177,47 @@ still main, explicitly dispatch the existing quality workflow on main, then
 verify that exact refresh run. Automatic tag selection can use this new main
 refresh while preserving the original successful push-CI prerequisite. A rerun
 of an expired run retains its original creation timestamp and stays expired.
-The accepted refresh `45939378824` is historical evidence for source
-`b422d7b02074ffa0e0148f7770ac87995b6b4ea2`; it cannot qualify this corrected
-source. Fresh exact-source main quality is required after integration.
 For an activated, separately authorized
 release recovery, dispatch `operation: release` from the unchanged version tag
-with that explicit refresh run ID. This reruns quality deliberately; the
+with that explicit refresh run ID. The preceding quality refresh is deliberate; the
 release workflow never silently rebuilds, switches source, selects older runs,
 or retries. If main has advanced, stop and review the new source/version rather
 than moving a tag. An expired owner wait requires a newly authorized read-only
 qualification attempt and fresh approval; there is no bypass or automatic rerun.
 
-Current version guards are 1.2.4. Fresh exact-source main quality is required
-after integration; the accepted Milestone 2B packet cannot publish this release.
-Before a separately authorized tag event, add only the exact tag `v1.2.4` to
-`zevyrn-ghcr-publication`, retaining the existing owner reviewer, self-review
-policy, disabled administrator bypass and all existing tag allowances. This
-local candidate does not change that environment or create the tag.
+### Superseded maintenance workflow retirement
 
-### Replacement before retirement and cost
+The successful protected v1.2.4 publication and anonymous Engine pulls establish
+replacement coverage. Milestone 2D removes only these maintenance entry points:
 
-Milestone 2B main retention and read-only verification are accepted above.
-Validate this activation candidate locally, then obtain separate authorization
-for its commit, hosted PR validation, integration and a real version-tag release,
-including protected approval and anonymous Docker pulls. Only after that path is
-accepted may the two superseded maintenance workflows be disabled under separate
-authorization. Preserve their files/history and legacy validators throughout
-migration; historical v1.2.1 tooling is outside this change.
+| Retired path under `.github/workflows/` | Last retained Git blob |
+| --- | --- |
+| `qualify-maintenance-image.yml` | `3601122058f57fab546f900c99827f1415d12df2` |
+| `publish-maintenance-image.yml` | `ef248e5ff8ba1c369f21d83d47d85ee8daf37a14` |
 
-Main quality gains one builder artifact of measured compressed size B. The
-combined qualification artifact retains approximately runtime packet R + builder
-packet B + small browser, receipt and scan records for seven days. This temporary
-second copy costs approximately B + (R+B) extra stored bytes per main/release pair;
-measured Milestone 2B sizes and runner time are recorded above. PR artifact scope does
-not gain builder bytes. Qualification performs zero image/application builds and
-zero browser-suite reruns, but adds fresh two-image scanning, authenticated
-downloads/inspection and post-publication Docker pulls. Locked tool installation
-is retained. The observed qualification reductions above exclude publication and consumer stages.
+Restoration source commit: `7459eb85141be8f8ac7745fd180ec3a9b71e0e34`.
+If separately authorized, restore the files on a feature branch with
+`git restore --source=7459eb85141be8f8ac7745fd180ec3a9b71e0e34 -- .github/workflows/qualify-maintenance-image.yml .github/workflows/publish-maintenance-image.yml`.
+Restoration requires renewed review and configuration-test updates before
+integration; restoring these files does not authorize dispatch or publication.
+Git history preserves the original files; no archived YAML copies are needed.
+Shared legacy validators, historical fixtures, release evidence and Python
+controllers remain intact. Unknown external callers of the retired dispatch
+endpoints have not been verified absent; operators must use the combined entry
+point and its documented inputs. The historical `publish-qualified-image.yml`
+and `ghcr-readonly-diagnostic.yml` remain unchanged for Milestone 4 review.
+
+Workflow files decrease from six to four; the final maintained target is two.
+Deleting inactive entry points adds no measured runner-time savings. The actual
+v1.2.4 release used one workflow/four jobs and 174 runner-seconds versus 364
+seconds for the prior comparable release path (52.2% lower; cache/runner timing
+varies). It added no qualification builds or repeated application/browser tests,
+and required zero routine manual release dispatches, while preserving protected
+owner approval. The earlier freshness refresh and resolver correction are
+separate recovery costs, not normal-path savings. Main builder retention and the
+combined qualification packet remain unchanged; no storage reduction is claimed.
+Historical freshness refresh `45939378824` belongs to source
+`b422d7b02074ffa0e0148f7770ac87995b6b4ea2`; it cannot qualify another source.
 
 The standalone v1.2.3 anonymous Docker Engine pull check remains deferred, not
 passed and nonblocking; a later release's consumer check cannot clear it.

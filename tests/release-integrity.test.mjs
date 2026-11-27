@@ -165,6 +165,7 @@ test('CLI diagnostic evidence contains only archive hash, validated index digest
 test('OCI graph rejects additional platforms, duplicate runtimes, orphan blobs, corrupt blobs and duplicate members',()=>{for(const change of [m=>m.extra={os:'linux',architecture:'arm64'},m=>m.extra={os:'windows',architecture:'amd64'},m=>m.duplicate=true,m=>m.orphan=true,m=>m.corrupt=true,m=>m.duplicateMember=true])assert.throws(graph(change));});
 test('OCI graph rejects unknown provenance and incorrect or multiple attestation subjects',()=>{for(const change of [m=>m.statement.predicateType='https://unrecognized',m=>m.statement._type='unknown',m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}}],m=>m.statement.subject=[{digest:{sha256:'d'.repeat(64)}},{digest:{sha256:'e'.repeat(64)}}]])assert.throws(graph(change));});
 test('archive config rejects historical version, false source labels and changed runtime protections',()=>{for(const change of [c=>c.config.Labels['org.opencontainers.image.version']='1.2.1',c=>c.config.Labels['org.opencontainers.image.revision']='f'.repeat(40),c=>c.config.User='0',c=>c.config.Entrypoint=['sh'],c=>c.config.Env.push('EXTRA=1'),c=>c.config.ExposedPorts['80/tcp']={},c=>c.config.Healthcheck.Retries=1]){const c=config();change(c);assert.throws(()=>validateConfig(c,source));}});
+// Historical maintenance-run fixtures keep the retained legacy validator contracts covered.
 function runFixture(){const start=new Date(now-600000).toISOString();return {run:{id:42,run_attempt:2,repository:{id:repositoryId,full_name:repository},head_repository:{id:repositoryId},path:'.github/workflows/qualify-maintenance-image.yml',event:'workflow_dispatch',head_branch:'main',head_sha:source,status:'completed',conclusion:'success',created_at:start,run_started_at:start},jobs:{total_count:3,jobs:['runtime','browser','seal'].map((name,id)=>({id,name,run_id:42,run_attempt:2,status:'completed',conclusion:'success'}))},artifacts:{total_count:1,artifacts:[{id:9,name:'zevyrn-v1.2.4-qualified-42-2',size_in_bytes:100,digest:sha,expired:false,created_at:new Date(now).toISOString(),workflow_run:{id:42,head_sha:source,head_branch:'main',repository_id:repositoryId,head_repository_id:repositoryId}}]}};}
 const assess=f=>validateRun(f.run,f.jobs,f.artifacts,source,now);
 test('qualification selects the immutable artifact from the exact successful source/run/attempt',()=>{assert.equal(assess(runFixture()).artifactId,9);});
@@ -510,21 +511,27 @@ test('failure metadata contains only fixed stage outcomes and pinned scanner/dat
   assert.deepEqual(sanitizedScanSummary({blocked:true,blockingVulnerabilities:1,secrets:0,results:[{secret:'TOKEN=fixture-secret'}]}),{blocked:true,blockingVulnerabilities:1,secrets:0});
   assert.throws(()=>sanitizedScanSummary({blocked:true,blockingVulnerabilities:'TOKEN=fixture-secret',secrets:0}));
 });
-test('qualification and read-only publication validation scan verified derived archives and preserve guards',{skip:!existsSync('.github/workflows/qualify-maintenance-image.yml')&&'Workflow contracts execute on the source checkout, not inside Docker'},()=>{
-  const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
-  for(const file of ['qualify-maintenance-image','publish-maintenance-image']){
-    const doc=yaml.parse(readFileSync(`.github/workflows/${file}.yml`,'utf8'));const job=doc.jobs[file.startsWith('qualify')?'runtime':'validate'];const script=job.steps.map(s=>s.run??'').join('\n');
-    assert(script.includes('prepare-scan'));assert(script.includes('scan-runtime'));assert(script.includes('$RUNNER_TEMP/runtime-scan.tar'));assert(!/trivy" image --input .*archive\.oci\.tar/.test(script));
-    assert(script.includes('v0.76.0'));assert(script.includes('e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7'));assert(script.includes('--download-db-only'));
-    for(const step of job.steps)assert(!step['continue-on-error']);
-    if(file.startsWith('qualify')){assert(script.includes('sbom-runtime'));const collect=job.steps.findIndex(s=>s.name==='Collect sanitized failed-archive diagnostics'),hardening=job.steps.findIndex(s=>s.id==='hardening');assert(collect>hardening);assert.equal(job.steps[collect].if,"failure()");const upload=job.steps.find(s=>s.with?.name?.startsWith('zevyrn-v1.2.4-failed-diagnostics-'));assert.match(upload.with.path,/artifacts\/release\/diagnostics\/\*\.json/);assert.match(upload.with.path,/summary\.md/);assert.equal(upload.with['retention-days'],7);assert.deepEqual(doc.permissions,{contents:'read',actions:'read'});}
-    else{assert.deepEqual(job.permissions,{contents:'read',actions:'read'});assert.equal(doc.jobs.promote.environment,'zevyrn-ghcr-publication');}
-  }
+test('combined qualification scans verified derived archives with pinned fresh intelligence and sanitized diagnostics',{skip:!existsSync('.github/workflows/release.yml')&&'Workflow contracts execute on the source checkout, not inside Docker'},()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+  const doc=yaml.parse(readFileSync('.github/workflows/release.yml','utf8')),job=doc.jobs.qualify;
+  const script=job.steps.map(s=>s.run??'').join('\n');
+  for(const text of ['prepare-scan','scan-runtime','scan-builder','$RUNNER_TEMP/runtime-scan.tar','v0.76.0','e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7','--download-db-only'])assert(script.includes(text),text);
+  assert(!/trivy" image --input .*archive\.oci\.tar/.test(script));
+  for(const step of job.steps)assert(!step['continue-on-error']);
+  const builder=job.steps.find(s=>s.id==='builder_scan'),gate=job.steps.find(s=>s.id==='security');
+  assert.match(builder.if,/!cancelled\(\)/);assert.doesNotMatch(builder.if,/runtime_scan/);
+  for(const id of ['runtime_scan','builder_scan'])assert(gate.run.includes('steps.'+id+'.outcome'));
+  assert.match(gate.run,/ci-security\.mjs trivy/);
+  const summary=job.steps.find(s=>s.name==='Sanitized security summary');assert.equal(summary.if,'always()');
+  const upload=job.steps.find(s=>s.with?.name?.startsWith('release-security-'));assert.equal(upload.if,'always()');
+  assert.equal(upload.with['retention-days'],14);assert.doesNotMatch(upload.with.path,/raw\.json|\.tar|assets\//);
+  assert.deepEqual(job.permissions,{contents:'read',actions:'read'});assert(!job.environment);
+  assert.equal(doc.jobs.publish.environment,'zevyrn-ghcr-publication');
 });
 
 test('security stages collect independent sanitized evidence and require every acceptance prerequisite',{skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts execute on the source checkout'},()=>{
   const require=createRequire(import.meta.url),{yaml}=require('playwright-core/lib/utilsBundle');
-  for(const [file,job] of [['quality-security','quality-image'],['qualify-maintenance-image','runtime']]) {
+  for(const [file,job] of [['quality-security','quality-image']]) {
     const steps=yaml.parse(readFileSync(`.github/workflows/${file}.yml`,'utf8')).jobs[job].steps;
     for(const id of ['runtime_scan','builder_scan','sbom','security'])assert(steps.some(s=>s.id===id));
     const builder=steps.find(s=>s.id==='builder_scan'),gate=steps.find(s=>s.id==='security'),sbom=steps.find(s=>s.id==='sbom');
@@ -533,7 +540,7 @@ test('security stages collect independent sanitized evidence and require every a
     assert.match(gate.run,/ci-security\.mjs trivy/);
     assert.match(sbom.run,/ci-security\.mjs sbom "\$RUNNER_TEMP\/runtime-sbom\.cdx\.json"/);
     const summary=steps.find(s=>s.name==='Actionable sanitized security summary');assert.equal(summary.if,'always()');
-    assert(steps.some(s=>s.if==='always()'&&s.uses?.startsWith('actions/upload-artifact@'))||file.startsWith('qualify'));
+    assert(steps.some(s=>s.if==='always()'&&s.uses?.startsWith('actions/upload-artifact@')));
     assert(steps.every(s=>!s['continue-on-error']));
   }
 });
@@ -557,10 +564,10 @@ test('candidate quality validation checks pinned base, patched packages and hard
       for(const line of (step.run??'').split('\n').filter(line=>line.includes('skopeo copy')))assert.match(line,/(?:oci-archive:artifacts\/security\/archive\.oci\.tar docker-daemon:zevyrn-ci-runtime:latest|"oci-archive:\$RUNNER_TEMP\/retained-builder\/builder\.oci\.tar" docker-daemon:zevyrn-ci-builder:latest)$/);
     }
   }
-  for(const publisher of ['publish-qualified-image','publish-maintenance-image'])assert.deepEqual(Object.keys(yaml.parse(readFileSync(`.github/workflows/${publisher}.yml`,'utf8')).on),['workflow_dispatch']);
-  const qualifier=yaml.parse(readFileSync('.github/workflows/qualify-maintenance-image.yml','utf8'));
-  assert.deepEqual(qualifier.permissions,{contents:'read',actions:'read'});
-  for(const job of Object.values(qualifier.jobs))assert(!job.environment&&!job.permissions);
+  assert.deepEqual(Object.keys(yaml.parse(readFileSync('.github/workflows/publish-qualified-image.yml','utf8')).on),['workflow_dispatch']);
+  const combined=yaml.parse(readFileSync('.github/workflows/release.yml','utf8'));
+  assert.deepEqual(combined.permissions,{});
+  for(const name of ['resolve','qualify']){assert.deepEqual(combined.jobs[name].permissions,{contents:'read',actions:'read'});assert(!combined.jobs[name].environment);}
 });
 test('container checks reject any loss of hardened execution settings',()=>{const c={Config:{User:'10001:10001'},State:{Running:true},HostConfig:{ReadonlyRootfs:true,Privileged:false,NetworkMode:'none',PidsLimit:128,Memory:134217728,CapDrop:['ALL'],CapAdd:null,SecurityOpt:['no-new-privileges'],Tmpfs:{'/tmp':'rw,noexec,nosuid,size=16m,mode=1777'}}};verifyContainer(c);for(const change of [x=>x.HostConfig.ReadonlyRootfs=false,x=>x.HostConfig.Privileged=true,x=>x.HostConfig.NetworkMode='default',x=>x.HostConfig.CapAdd=['SYS_ADMIN'],x=>x.HostConfig.SecurityOpt=[],x=>x.HostConfig.Tmpfs['/tmp']='rw',x=>x.Config.User='0']){const x=clone(c);change(x);assert.throws(()=>verifyContainer(x));}});
 test('documented Skopeo Repository/Tags response accepts an absent destination and existing historical tags',()=>{
