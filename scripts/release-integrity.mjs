@@ -8,7 +8,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {gunzipSync} from 'node:zlib';
 import {pathToFileURL} from 'node:url';
-import {validateBuilderAcceptance} from './ci-security.mjs';
+import {validateBuilderAcceptance,approvedTrivy} from './ci-security.mjs';
 const builderExceptions=JSON.parse(readFileSync(new URL('./ci-builder-exceptions.json',import.meta.url)));
 export const repository='TheStateOfWhere/zevyrn-password-generator';
 export const repositoryId=1421770645;
@@ -54,7 +54,7 @@ export function sanitizedFailureStages(input){
 }
 export function sanitizedScannerMetadata(input){
   if(!input)return null;
-  assert(input.Version==='0.76.0'&&input.VulnerabilityDB?.Version===2);
+  assert(input.Version===approvedTrivy.version&&input.VulnerabilityDB?.Version===2);
   const db={Version:2};for(const name of ['UpdatedAt','DownloadedAt','NextUpdate']){const value=input.VulnerabilityDB[name];assert(typeof value==='string'&&/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(value)&&Number.isFinite(Date.parse(value)));db[name]=value;}
   return {Version:input.Version,VulnerabilityDB:db};
 }
@@ -289,7 +289,7 @@ export function validateEvidence(identity,evidence,context) {
   validateBuilderAcceptance(builder,builderExceptions);
   assert(builderIdentity.sourceCommit===identity.sourceCommit&&builderIdentity.sourceTree===identity.sourceTree&&hex.test(builderIdentity.archiveSHA256));sha(builderIdentity.imageID);
   assert(npm.blocked===false&&npm.counts.high===0&&npm.counts.critical===0);
-  assert(scanner.Version==='0.76.0'&&scanner.VulnerabilityDB?.Version===2);
+  assert(scanner.Version===approvedTrivy.version&&scanner.VulnerabilityDB?.Version===2);
   for(const field of ['UpdatedAt','DownloadedAt','NextUpdate'])assert(Number.isFinite(Date.parse(scanner.VulnerabilityDB[field])));
   assert(Date.parse(scanner.VulnerabilityDB.DownloadedAt)>=context.startedAt&&Date.parse(scanner.VulnerabilityDB.UpdatedAt)<=Date.parse(scanner.VulnerabilityDB.DownloadedAt)+300000);
   assert(sbom.bomFormat==='CycloneDX'&&sbom.components?.length>0);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -10,6 +10,51 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { screenshotDirectory } from './browser-artifacts.mjs';
 const read = name => readFile(new URL('../'+name, import.meta.url), 'utf8');
+
+test('maintained scanner downloads use one source identity and verify bytes and executed version before DB access', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
+  for(const [file,job] of [['quality-security','quality-image'],['release','qualify']]){
+    const workflow=yaml.parse(await read('.github/workflows/'+file+'.yml')),scanner=workflow.jobs[job].steps.find(s=>s.id==='scanner'),script=scanner.run;
+    assert.equal(scanner.shell,'bash');assert(!scanner['continue-on-error']);
+    assert(script.includes('toolchain="$(node scripts/ci-security.mjs toolchain)"'));
+    assert(script.includes('read -r trivy_version trivy_sha256 <<< "$toolchain"'));
+    assert(script.includes('https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/trivy_${trivy_version}_Linux-64bit.tar.gz'));
+    assert(script.includes('"$trivy_sha256"')&&script.includes('sha256sum --check --strict'));
+    assert(script.indexOf('sha256sum --check --strict')<script.indexOf('tar -xzf'));
+    assert(script.indexOf('tar -xzf')<script.indexOf(' version --format json'));
+    assert(script.indexOf('ci-security.mjs scanner-version')<script.indexOf('--download-db-only'));
+    assert(!/0\.76\.0|e24b1c51293c1b15/.test(JSON.stringify(workflow)),'No duplicate active scanner authority');
+  }
+  const helper=await read('scripts/ci-security.mjs'),integrity=await read('scripts/release-integrity.mjs');
+  assert(helper.includes("new URL('./ci-toolchain.json',import.meta.url)"));
+  assert(integrity.includes('approvedTrivy.version'));assert(!/0\.76\.0|e24b1c51293c1b15/.test(helper+integrity));
+});
+
+test('actual scanner shell blocks reject bad bytes and executed versions before database access (local recording controls)', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),identity=JSON.parse(await read('scripts/ci-toolchain.json')).trivy;
+  const directory=await mkdtemp(join(tmpdir(),'zevyrn-scanner-control-'));
+  const shell=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'/bin/bash';
+  const posix=path=>path.replaceAll('\\','/');
+  const fixture=Buffer.from('synthetic archive; not an executable scanner'),digest=createHash('sha256').update(fixture).digest('hex');
+  const executable='#!/bin/bash\nset -eu\nif [[ " $* " == *" version "* ]]; then printf "execute-version\\n" >> "$CALLS_FILE"; printf \'{"Version":"%s"}\\n\' "$EXECUTED_VERSION"; else printf "database\\n" >> "$CALLS_FILE"; fi\n';
+  // Synthetic transport and executable only. Real sha256sum and the production
+  // source-relative version validator execute; no network or real Trivy is used.
+  const controls='curl() { printf "download\\n" >> "$CALLS_FILE"; cp "$FIXTURE_ARCHIVE" "$RUNNER_TEMP/trivy.tar.gz"; }\ntar() { printf "extract\\n" >> "$CALLS_FILE"; }\nnode() { if [[ "$2" == toolchain ]]; then printf "%s %s\\n" "$EXPECTED_VERSION" "$EXPECTED_SHA"; else "$NODE_BIN" "$SOURCE_CLI" "${@:2}"; fi; }\n';
+  try{
+    for(const [file,job] of [['quality-security','quality-image'],['release','qualify']]){
+      const script=yaml.parse(await read('.github/workflows/'+file+'.yml')).jobs[job].steps.find(s=>s.id==='scanner').run;
+      for(const scenario of ['valid','checksum','version']){
+        const run=join(directory,file+'-'+scenario);await mkdir(join(run,'trivy-bin'),{recursive:true});await mkdir(join(run,'artifacts/security'),{recursive:true});await mkdir(join(run,'qualified'));
+        await writeFile(join(run,'fixture.tar.gz'),fixture);await writeFile(join(run,'calls.txt'),'');
+        for(const path of ['trivy','trivy-bin/trivy'])await writeFile(join(run,path),executable);
+        const result=spawnSync(shell,['-e','-u','-o','pipefail','-c','chmod +x "$RUNNER_TEMP/trivy" "$RUNNER_TEMP/trivy-bin/trivy"\n'+controls+script],{cwd:run,encoding:'utf8',env:{...process.env,RUNNER_TEMP:posix(run),GITHUB_PATH:posix(join(run,'github-path')),FIXTURE_ARCHIVE:posix(join(run,'fixture.tar.gz')),CALLS_FILE:posix(join(run,'calls.txt')),EXPECTED_VERSION:identity.version,EXPECTED_SHA:scenario==='checksum'?'0'.repeat(64):digest,EXECUTED_VERSION:scenario==='version'?'99.0.0':identity.version,NODE_BIN:posix(process.execPath),SOURCE_CLI:posix(fileURLToPath(new URL('../scripts/ci-security.mjs',import.meta.url)))}});
+        const calls=await readFile(join(run,'calls.txt'),'utf8');
+        if(scenario==='valid'){assert.equal(result.status,0,result.stderr);assert(calls.includes('database'));assert(calls.indexOf('execute-version')<calls.indexOf('database'));}
+        else{assert.notEqual(result.status,0);assert(!calls.includes('database'));if(scenario==='checksum')assert(!calls.includes('extract')&&!calls.includes('execute-version'));else assert(calls.includes('execute-version'));}
+      }
+    }
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
 
 test('Dependabot checks exactly three root ecosystems weekly and excludes only historical workflow paths', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Dependabot contracts run on the source checkout'},async()=>{
   const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');

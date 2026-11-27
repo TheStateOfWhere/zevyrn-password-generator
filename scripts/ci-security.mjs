@@ -1,10 +1,39 @@
 // CI-only report reduction: never publish scanner secret matches or source snippets.
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
+import {readFileSync,lstatSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
 import {compilerPolicy} from './verify-compiler.mjs';
 await compilerPolicy();
+// Source-relative only: artifact contents, cwd and environment cannot select this authority.
+export function parseCiToolchain(text) {
+  try {
+    if(typeof text!=='string')throw Error();
+    const value=JSON.parse(text),object=v=>v&&typeof v==='object'&&!Array.isArray(v);
+    if(!object(value)||Object.keys(value).join(',')!=='trivy'||!object(value.trivy))throw Error();
+    const t=value.trivy;
+    if(Object.keys(t).sort().join(',')!=='sha256,version'
+      ||typeof t.version!=='string'||!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(t.version)
+      ||typeof t.sha256!=='string'||!/^[0-9a-f]{64}$/.test(t.sha256))throw Error();
+    // Only simple ASCII values are permitted; duplicate keys and escaped aliases
+    // cannot survive this comparison, even when JSON.parse would normalize them.
+    if(text.replace(/[ \t\r\n]/g,'')!==JSON.stringify(value))throw Error();
+    return Object.freeze({trivy:Object.freeze({version:t.version,sha256:t.sha256})});
+  }catch{throw Error('INVALID_CI_TOOLCHAIN: reviewed scanner configuration is invalid');}
+}
+function sourceToolchain() {
+  try {
+    const file=new URL('./ci-toolchain.json',import.meta.url),stat=lstatSync(file);
+    if(!stat.isFile()||stat.isSymbolicLink())throw Error();
+    return parseCiToolchain(readFileSync(file,'utf8'));
+  }catch{throw Error('INVALID_CI_TOOLCHAIN: reviewed scanner configuration is missing or invalid');}
+}
+export const approvedTrivy=sourceToolchain().trivy;
+export function validateTrivyVersion(report) {
+  if(!report||Array.isArray(report)||!Object.hasOwn(report,'Version')||report.Version!==approvedTrivy.version)
+    throw Error('SCANNER_VERSION_MISMATCH: executed or reported scanner differs from reviewed source');
+}
 const requiredNode=[
   {name:'@typescript/typescript6',version:'6.0.2',path:'app/node_modules/@typescript/typescript6/package.json'},
   {name:'typescript',version:'6.0.3',path:'app/node_modules/@typescript/old/package.json'},
@@ -107,7 +136,7 @@ export function securitySummary(reports,scanner,stages={},roles=['runtime','buil
 export function assessTrivy(report,role,exceptionPolicy={schemaVersion:1,exceptions:[]}) {
   // A CI coverage check, not the archive-bound image-qualification validator.
   if(!['runtime','builder'].includes(role)) throw Error('Expected CI image role');
-  if(report?.SchemaVersion!==2||report.ArtifactType!=='container_image'||report.Trivy?.Version!=='0.76.0'
+  if(report?.SchemaVersion!==2||report.ArtifactType!=='container_image'||report.Trivy?.Version!==approvedTrivy.version
     ||!/^sha256:[0-9a-f]{64}$/.test(report.Metadata?.ImageID||'')||report.Metadata?.OS?.Family!=='alpine'
     ||['error','Error','Errors'].some(key=>Object.hasOwn(report,key))||!Array.isArray(report.Results)||!report.Results.length) throw Error('Invalid Trivy report or missing coverage');
   const exceptions=role==='builder'?builderExceptionPolicy(exceptionPolicy):[];
@@ -174,6 +203,14 @@ async function main() {
   const readJSON=async path=>JSON.parse(await readFile(path,'utf8'));
   const writeJSON=async(path,value)=>{await mkdir(dirname(path),{recursive:true});await writeFile(path,JSON.stringify(value,null,2)+'\n');};
   const policy=async()=>readJSON(new URL('./ci-builder-exceptions.json',import.meta.url));
+  if(kind==='toolchain') {
+    if(pairs.length)throw Error('Toolchain authority cannot be overridden');
+    console.log(approvedTrivy.version+' '+approvedTrivy.sha256);return;
+  }
+  if(kind==='scanner-version') {
+    if(pairs.length!==1)throw Error('Expected executed scanner version report');
+    validateTrivyVersion(await readJSON(pairs[0]));return;
+  }
   if(kind==='report') {
     const [role,input,output]=pairs;if(pairs.length!==3)throw Error('Expected role and report paths');
     if(!['runtime','builder'].includes(role))throw Error('Expected image role');

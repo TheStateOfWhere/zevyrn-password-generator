@@ -168,6 +168,13 @@ test('archive config rejects historical version, false source labels and changed
 // Historical maintenance-run fixtures keep the retained legacy validator contracts covered.
 function runFixture(){const start=new Date(now-600000).toISOString();return {run:{id:42,run_attempt:2,repository:{id:repositoryId,full_name:repository},head_repository:{id:repositoryId},path:'.github/workflows/qualify-maintenance-image.yml',event:'workflow_dispatch',head_branch:'main',head_sha:source,status:'completed',conclusion:'success',created_at:start,run_started_at:start},jobs:{total_count:3,jobs:['runtime','browser','seal'].map((name,id)=>({id,name,run_id:42,run_attempt:2,status:'completed',conclusion:'success'}))},artifacts:{total_count:1,artifacts:[{id:9,name:'zevyrn-v1.2.4-qualified-42-2',size_in_bytes:100,digest:sha,expired:false,created_at:new Date(now).toISOString(),workflow_run:{id:42,head_sha:source,head_branch:'main',repository_id:repositoryId,head_repository_id:repositoryId}}]}};}
 const assess=f=>validateRun(f.run,f.jobs,f.artifacts,source,now);
+test('historical and active scanner evidence cannot substitute a different scanner via receipt fields',()=>{
+  const f=evidenceFixture();validateEvidence(f.identity,f.evidence,f.context);
+  const changed=clone(f);changed.evidence.scanner.Version='0.77.0';changed.evidence.scanner.ciToolchain={trivy:{version:'0.77.0',sha256:'a'.repeat(64)}};
+  assert.throws(()=>validateEvidence(changed.identity,changed.evidence,changed.context));
+  assert.throws(()=>releaseFreshness(new Date(now-600000).toISOString(),changed.evidence.scanner,now));
+  assert.throws(()=>sanitizedScannerMetadata(changed.evidence.scanner));
+});
 test('qualification selects the immutable artifact from the exact successful source/run/attempt',()=>{assert.equal(assess(runFixture()).artifactId,9);});
 test('qualification rejects wrong repository, workflow, source, branch, event, status, conclusion and stale runs',()=>{for(const change of [f=>f.run.repository.id++,f=>f.run.head_repository.id++,f=>f.run.path='.github/workflows/other.yml',f=>f.run.head_sha='d'.repeat(40),f=>f.run.head_branch='other',f=>f.run.event='pull_request',f=>f.run.status='in_progress',f=>f.run.conclusion='failure',f=>f.run.created_at=new Date(now-86400001).toISOString()]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
 test('qualification rejects every unsuccessful, skipped, missing, duplicate or previous-attempt required job',()=>{for(let i=0;i<3;i++)for(const change of [j=>j.conclusion='failure',j=>j.conclusion='skipped',j=>j.status='in_progress',j=>j.run_attempt=1,j=>j.run_id=41]){const f=runFixture();change(f.jobs.jobs[i]);assert.throws(()=>assess(f));}for(const change of [f=>f.jobs.jobs.pop(),f=>f.jobs.jobs[2]=clone(f.jobs.jobs[0])]){const f=runFixture();change(f);assert.throws(()=>assess(f));}});
@@ -515,7 +522,7 @@ test('combined qualification scans verified derived archives with pinned fresh i
   const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
   const doc=yaml.parse(readFileSync('.github/workflows/release.yml','utf8')),job=doc.jobs.qualify;
   const script=job.steps.map(s=>s.run??'').join('\n');
-  for(const text of ['prepare-scan','scan-runtime','scan-builder','$RUNNER_TEMP/runtime-scan.tar','v0.76.0','e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7','--download-db-only'])assert(script.includes(text),text);
+  for(const text of ['prepare-scan','scan-runtime','scan-builder','$RUNNER_TEMP/runtime-scan.tar','ci-security.mjs toolchain','"$trivy_sha256"','ci-security.mjs scanner-version','--download-db-only'])assert(script.includes(text),text);
   assert(!/trivy" image --input .*archive\.oci\.tar/.test(script));
   for(const step of job.steps)assert(!step['continue-on-error']);
   const builder=job.steps.find(s=>s.id==='builder_scan'),gate=job.steps.find(s=>s.id==='security');
