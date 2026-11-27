@@ -578,10 +578,10 @@ export function combinedEntry(env,checkedOut,sourceTree,isMainAncestor){
   const runId=Number(env.GITHUB_RUN_ID),runAttempt=Number(env.GITHUB_RUN_ATTEMPT);positive(runId);positive(runAttempt);
   return {repositoryId,workflow:releaseWorkflow,workflowRevision:checkedOut,sourceCommit:checkedOut,sourceTree,runId,runAttempt,publish,event:env.GITHUB_EVENT_NAME,operation,ref:env.GITHUB_REF};
 }
-export function selectQualityRun(runs,source){
-  commit(source);assert(runs.total_count===runs.workflow_runs.length&&runs.total_count>0&&runs.total_count<=100,'Quality run listing is incomplete');
-  const matches=runs.workflow_runs.filter(r=>r.head_sha===source&&r.head_branch==='main'&&r.event==='push'&&r.path===qualityWorkflow);
-  assert(matches.length>0,'No exact-source main push quality run; do not substitute another source');
+export function selectQualityRun(runs,source,allowRefresh=false){
+  commit(source);assert(runs.total_count===runs.workflow_runs.length&&runs.total_count>=0&&runs.total_count<=1000,'Quality run listing is incomplete');
+  const matches=runs.workflow_runs.filter(r=>r.head_sha===source&&r.head_branch==='main'&&(r.event==='push'||allowRefresh&&r.event==='workflow_dispatch')&&r.path===qualityWorkflow);
+  assert(matches.length>0,allowRefresh?'No exact-source main quality evidence; explicitly refresh quality on the approved main source':'No exact-source main push quality run; do not substitute another source');
   for(const info of matches){positive(info.id);assert(Number.isFinite(Date.parse(info.created_at)));}
   matches.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)||b.id-a.id);
   // Select first, then validate. Never fall back past a failed/incomplete run.
@@ -674,13 +674,35 @@ export function validateVersionCollision(tags){validateTags(tags);}
 const apiJSON=path=>json(run('gh',['api',`repos/${repository}${path?'/'+path:''}`]));
 const currentRun=id=>apiJSON(`actions/runs/${id}`);
 const currentJobs=info=>apiJSON(`actions/runs/${info.id}/attempts/${info.run_attempt}/jobs?per_page=100`);
-async function selectUpstream(id,entry,sourceCI){
-  positive(id);const info=currentRun(id),workflow=apiJSON('actions/workflows/quality-security.yml'),sourceInfo=apiJSON(`git/commits/${entry.sourceCommit}`);
-  const selected=authenticateMainQuality(info,currentJobs(info),apiJSON(`actions/runs/${id}/artifacts?per_page=100`),workflow,sourceInfo,entry.sourceCommit,Date.now(),true);
+async function selectUpstream(id,entry,sourceCI,read=apiJSON,now){
+  positive(id);const info=read(`actions/runs/${id}`),workflow=read('actions/workflows/quality-security.yml'),sourceInfo=read(`git/commits/${entry.sourceCommit}`);
+  assert(info.id===id,'Selected quality run ID changed');
+  const jobs=run=>read(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
+  const selected=authenticateMainQuality(info,jobs(info),read(`actions/runs/${id}/artifacts?per_page=100`),workflow,sourceInfo,entry.sourceCommit,now??Date.now(),true);
   same(sourceInfo.tree.sha,entry.sourceTree);
-  const prerequisite=currentRun(sourceCI);validateQuality(prerequisite,currentJobs(prerequisite),entry.sourceCommit);
+  const prerequisite=read(`actions/runs/${sourceCI}`);assert(prerequisite.id===sourceCI,'Source CI run ID changed');validateQuality(prerequisite,jobs(prerequisite),entry.sourceCommit);
   assert(prerequisite.workflow_id===workflow.id&&prerequisite.repository.full_name===repository);
   return {...selected,sourceCIRun:sourceCI,sourceCIAttempt:prerequisite.run_attempt};
+}
+export async function resolveQualitySelection(entry,requested,read=apiJSON,now){
+  commit(entry.sourceCommit);commit(entry.sourceTree);
+  // Retrieve all events, not success-only results: a newer failure must block,
+  // never cause fallback to older evidence. Bound and authenticate pagination.
+  const runs={total_count:0,workflow_runs:[]},seen=new Set();
+  for(let page=1;;page++){
+    const result=read(`actions/workflows/quality-security.yml/runs?branch=main&head_sha=${entry.sourceCommit}&per_page=100&page=${page}`);
+    assert(Number.isSafeInteger(result.total_count)&&result.total_count>=0&&result.total_count<=1000&&Array.isArray(result.workflow_runs),'Invalid or excessive quality run listing');
+    if(page===1)runs.total_count=result.total_count;else assert(result.total_count===runs.total_count,'Quality run listing changed during pagination');
+    assert(result.workflow_runs.length===Math.min(100,runs.total_count-runs.workflow_runs.length),'Quality run listing is incomplete');
+    for(const run of result.workflow_runs){positive(run.id);assert(!seen.has(run.id),'Duplicate quality run listing');seen.add(run.id);runs.workflow_runs.push(run);}
+    if(runs.workflow_runs.length===runs.total_count)break;
+  }
+  const automatic=requested===undefined?selectQualityRun(runs,entry.sourceCommit,true):requested;
+  // Refresh evidence supplements the latest exact-source push-CI prerequisite.
+  const sourceCI=selectQualityRun(runs,entry.sourceCommit);
+  const selection=await selectUpstream(automatic,entry,sourceCI,read,now);
+  if(requested===undefined){const listed=runs.workflow_runs.find(run=>run.id===automatic);assert(selection.createdAt===listed.created_at&&selection.runAttempt===listed.run_attempt,'Selected quality listing identity changed');}
+  return selection;
 }
 async function downloadZip(artifact,directory,layout){
   const bytes=run('gh',['api',`repos/${repository}/actions/artifacts/${artifact.id}/zip`]);
@@ -716,10 +738,8 @@ async function combinedResolve(output){
   const releaseRun=currentRun(entry.runId);assert(releaseRun.workflow_id===workflow.id&&releaseRun.head_sha===source&&releaseRun.run_attempt===entry.runAttempt&&releaseRun.repository?.id===repositoryId&&releaseRun.head_repository?.id===repositoryId&&releaseRun.path===releaseWorkflow);
   assert(releaseRun.event===entry.event&&releaseRun.head_branch===(entry.publish?`v${version}`:'main'));
   entry.startedAt=releaseRun.run_started_at;assert(Number.isFinite(Date.parse(entry.startedAt)));
-  const runs=apiJSON(`actions/workflows/quality-security.yml/runs?branch=main&event=push&head_sha=${source}&per_page=100`),sourceCI=selectQualityRun(runs,source);
-  const requested=env.QUALITY_RUN_ID?Number(env.QUALITY_RUN_ID):sourceCI;
-  // Manual refresh is explicit. The original exact-source push-CI prerequisite remains mandatory.
-  const selection=await selectUpstream(requested,entry,sourceCI);
+  const requested=env.QUALITY_RUN_ID?Number(env.QUALITY_RUN_ID):undefined;
+  const selection=await resolveQualitySelection(entry,requested);
   if(entry.publish)validateReleaseRef(run('git',['ls-remote','--exit-code','origin',`refs/tags/v${version}`,`refs/tags/v${version}^{}`]).toString(),source);
   await writeJSON(output,{entry,selection});
   if(env.GITHUB_OUTPUT)await writeFile(env.GITHUB_OUTPUT,`publish=${entry.publish}\n`,{flag:'a'});
@@ -926,6 +946,7 @@ const combinedFailureHints={
   'scan-builder':'BUILDER_SCAN_REJECTED: retained OCI/Docker-save configuration and layers must match, with complete vulnerability and file/configuration-secret coverage.'
 };
 const publicReleaseErrors=new Set(['Live tag publication is disabled pending separate authorization','Reused main evidence expired: explicitly refresh main quality','Selected main quality evidence expired','Approval exceeded promotion database freshness: new qualification and approval required','Release database predates this release attempt','Source metadata does not match release guard','No exact-source main push quality run; do not substitute another source',...['runtime','builder','browser'].map(role=>`Missing or ambiguous ${role} artifact: run current main quality explicitly`)]);
+publicReleaseErrors.add('No exact-source main quality evidence; explicitly refresh quality on the approved main source');
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{
   console.error(diagnosticCode(error));
   if(builderFailureDetails.has(error))console.error(JSON.stringify(builderFailureDetails.get(error)));

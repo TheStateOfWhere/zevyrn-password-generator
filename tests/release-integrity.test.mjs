@@ -1,4 +1,5 @@
 import {test} from 'node:test';
+import {resolveQualitySelection} from '../scripts/release-integrity.mjs';
 import {gzipSync} from 'node:zlib';
 import {Readable} from 'node:stream';
 import {createRequire} from 'node:module';
@@ -222,6 +223,91 @@ test('run resolution pins newest exact-source main push run without falling back
   assert.throws(()=>authenticateMainQuality(latest,f.jobs,f.artifacts,f.workflow,f.sourceInfo,source,now));
   assert.throws(()=>selectQualityRun({...runs,total_count:101},source));assert.throws(()=>selectQualityRun(runs,tree));
 });
+// The API-driven entry point below is also called by the real combined-resolve CLI.
+function resolverRun(id,event,created=now-600000){
+  const f=mainReleaseFixture();Object.assign(f.run,{id,event,created_at:new Date(created).toISOString(),run_started_at:new Date(created).toISOString()});
+  for(const j of f.jobs.jobs)j.run_id=id;
+  for(const [i,a] of f.artifacts.artifacts.entries()){a.id=id*10+i;a.name=`quality-${['runtime','builder','browser'][i]}-${id}-2`;a.workflow_run.id=id;}
+  return f;
+}
+function resolverFixture(){
+  const f={push:resolverRun(42,'push'),refresh:resolverRun(43,'workflow_dispatch',now-60000),entry:{sourceCommit:source,sourceTree:tree},calls:[]};
+  f.list=[f.push.run,f.refresh.run];f.records=new Map([[42,f.push],[43,f.refresh]]);
+  f.read=path=>{
+    f.calls.push(path);const query=`actions/workflows/quality-security.yml/runs?branch=main&head_sha=${source}&per_page=100&page=`;
+    if(path.startsWith(query)){const start=(Number(path.slice(query.length))-1)*100;return clone({total_count:f.list.length,workflow_runs:f.list.slice(start,start+100)});}
+    if(path==='actions/workflows/quality-security.yml')return clone(f.push.workflow);
+    if(path===`git/commits/${source}`)return clone(f.push.sourceInfo);
+    const m=path.match(/^actions\/runs\/(\d+)(.*)$/);assert(m,'Unexpected API request: '+path);const record=f.records.get(Number(m[1]));assert(record,'Unexpected run');
+    if(m[2]==='')return clone(record.run);
+    if(m[2]===`/attempts/${record.run.run_attempt}/jobs?per_page=100`)return clone(record.jobs);
+    assert.equal(m[2],'/artifacts?per_page=100');return clone(record.artifacts);
+  };
+  f.check=id=>resolveQualitySelection(f.entry,id,f.read,now);return f;
+}
+test('automatic resolver accepts fresh push and expired push with a fresh exact-main manual refresh',async()=>{
+  const push=resolverFixture();push.list=[push.push.run];assert.equal((await push.check()).runId,42);
+  const f=resolverFixture();f.push.run.created_at=new Date(now-86400001).toISOString();f.push.run.run_started_at=f.push.run.created_at;
+  const s=await f.check();assert.equal(s.runId,43);assert.equal(s.event,'workflow_dispatch');assert.equal(s.sourceCIRun,42);assert.equal(s.sourceCIAttempt,2);
+});
+test('automatic resolver orders original creation time and run ID, never update or upload time',async()=>{
+  const f=resolverFixture();f.push.run.updated_at=new Date(now).toISOString();f.push.run.run_started_at=new Date(now-1000).toISOString();assert.equal((await f.check()).runId,43);
+  f.push.run.created_at=f.refresh.run.created_at;assert.equal((await f.check()).runId,43);f.list.reverse();assert.equal((await f.check()).runId,43);
+  const third=resolverRun(44,'workflow_dispatch',Date.parse(f.refresh.run.created_at));f.records.set(44,third);f.list.push(third.run);assert.equal((await f.check()).runId,44);
+});
+test('automatic resolver excludes wrong-source, feature, unrelated workflow, PR and scheduled evidence',async()=>{
+  for(const change of [r=>r.head_sha=tree,r=>r.head_branch='feature',r=>r.path='.github/workflows/untrusted.yml',r=>r.event='pull_request',r=>r.event='schedule']){
+    const f=resolverFixture();f.push.run.created_at=new Date(now-86400001).toISOString();f.push.run.run_started_at=f.push.run.created_at;change(f.refresh.run);
+    await assert.rejects(f.check(),/expired/);assert(!f.calls.includes('actions/runs/43'));
+  }
+});
+test('automatic resolver rejects tree, workflow, repository and run substitutions without fallback',async()=>{
+  for(const change of [f=>f.entry.sourceTree=source,f=>f.push.sourceInfo.tree.sha=source,f=>f.refresh.run.repository.id++,f=>f.refresh.run.repository.full_name='foreign/repo',f=>f.refresh.run.head_repository.id++,f=>f.refresh.run.head_repository.full_name='foreign/repo',f=>f.refresh.run.workflow_id++,f=>f.push.workflow.state='disabled_manually']){
+    const f=resolverFixture();change(f);await assert.rejects(f.check());assert(!f.calls.includes('actions/runs/42'));
+  }
+  const f=resolverFixture(),read=f.read;await assert.rejects(resolveQualitySelection(f.entry,undefined,path=>{const r=read(path);if(path==='actions/runs/43')r.id=42;return r;},now),/run ID changed/);
+});
+test('automatic resolver rejects newest failed or incomplete workflows and unsuccessful required jobs',async()=>{
+  const changes=[f=>f.refresh.run.status='in_progress',f=>f.refresh.run.conclusion='failure',f=>f.refresh.run.conclusion='cancelled',f=>f.refresh.run.conclusion=null,
+    ...['quality-image','browser'].flatMap(name=>['failure','cancelled','skipped',null].map(outcome=>f=>f.refresh.jobs.jobs.find(j=>j.name===name).conclusion=outcome)),
+    f=>f.refresh.jobs.jobs[0].status='in_progress',f=>f.refresh.jobs.jobs[0].run_attempt--,f=>f.refresh.jobs.jobs[0].run_id++,f=>f.refresh.jobs.jobs.pop()];
+  for(const change of changes){const f=resolverFixture();change(f);await assert.rejects(f.check());assert(!f.calls.includes('actions/runs/42'));}
+});
+test('automatic resolver rejects expired push/manual evidence and expired reruns with new uploads',async()=>{
+  const f=resolverFixture();for(const [i,r] of [f.push,f.refresh].entries())r.run.created_at=new Date(now-86410000+i*1000).toISOString();
+  f.refresh.run.run_attempt=3;f.refresh.run.run_started_at=new Date(now-1000).toISOString();for(const j of f.refresh.jobs.jobs)j.run_attempt=3;
+  for(const a of f.refresh.artifacts.artifacts){a.name=a.name.replace('-43-2','-43-3');a.created_at=new Date(now).toISOString();}
+  await assert.rejects(f.check(),/expired/);assert(!f.calls.includes('actions/runs/42'));
+  const push=resolverFixture();push.list=[push.push.run];push.push.run.created_at=new Date(now-86400001).toISOString();await assert.rejects(push.check(),/expired/);
+});
+test('automatic resolver rejects missing, substituted, wrong-attempt and malformed artifacts',async()=>{
+  for(const change of [f=>f.refresh.artifacts.artifacts.splice(1,1),f=>f.refresh.artifacts.artifacts[1].id=f.refresh.artifacts.artifacts[0].id,f=>f.refresh.artifacts.artifacts[0].digest='bad',f=>f.refresh.artifacts.artifacts[0].workflow_run.id++,f=>f.refresh.artifacts.artifacts[1].name='quality-builder-43-1',f=>f.refresh.artifacts.artifacts[0].workflow_run.head_sha=tree,f=>f.refresh.artifacts.artifacts[0].expired=true,f=>f.refresh.run.run_attempt++,f=>f.refresh.artifacts.artifacts[0].created_at=new Date(now-86400000).toISOString()]){
+    const f=resolverFixture();change(f);f.refresh.artifacts.total_count=f.refresh.artifacts.artifacts.length;await assert.rejects(f.check());assert(!f.calls.includes('actions/runs/42'));
+  }
+});
+test('automatic resolver paginates all events and rejects gaps, duplicate IDs and unstable counts',async()=>{
+  const f=resolverFixture(),unrelated=Array.from({length:99},(_,i)=>({...f.refresh.run,id:1000+i,event:'schedule'}));f.list=[...unrelated,f.push.run,f.refresh.run];
+  assert.equal((await f.check()).runId,43);assert(f.calls.some(p=>p.endsWith('page=2')));assert(f.calls.every(p=>!p.includes('&event=')));
+  for(const corrupt of [r=>r.workflow_runs.pop(),r=>r.workflow_runs[1]=r.workflow_runs[0],r=>r.total_count++,r=>r.total_count=1001]){
+    const x=resolverFixture(),read=x.read;await assert.rejects(resolveQualitySelection(x.entry,undefined,path=>{const r=read(path);if(path.includes('/runs?'))corrupt(r);return r;},now),/listing/);
+  }
+  const x=resolverFixture();x.list=[...unrelated,x.push.run,x.refresh.run];const read=x.read;await assert.rejects(resolveQualitySelection(x.entry,undefined,path=>{const r=read(path);if(path.endsWith('page=2'))r.total_count++;return r;},now),/changed during pagination/);
+});
+test('automatic resolver fails actionably without evidence and preserves explicit recovery and push CI',async()=>{
+  const none=resolverFixture();none.list=[];await assert.rejects(none.check(),/explicitly refresh quality on the approved main source/);
+  const noPush=resolverFixture();noPush.list=[noPush.refresh.run];await assert.rejects(noPush.check(),/main push quality run/);
+  const f=resolverFixture();assert.equal((await f.check(42)).runId,42);assert.equal((await f.check(43)).runId,43);await assert.rejects(f.check(NaN));
+  const bad=resolverFixture();bad.push.run.conclusion='failure';await assert.rejects(bad.check(43));
+  const changed=resolverFixture(),read=changed.read;await assert.rejects(resolveQualitySelection(changed.entry,undefined,path=>{const r=read(path);if(path.includes('/runs?'))r.workflow_runs.find(r=>r.id===43).run_attempt++;return r;},now),/listing identity changed/);
+});
+
+test('combined-resolve uses the tested automatic entry point and current API selection identity',()=>{
+  const implementation=readFileSync(new URL('../scripts/release-integrity.mjs',import.meta.url),'utf8');
+  const cli=implementation.slice(implementation.indexOf('async function combinedResolve('),implementation.indexOf('async function combinedFetch('));
+  assert(cli.includes('resolveQualitySelection(entry,requested)'));assert(!cli.includes('&event=push'));
+  assert(implementation.includes("publicReleaseErrors.add('No exact-source main quality evidence; explicitly refresh quality on the approved main source')"));
+});
+
 test('read-only dispatch cannot request publication; tag publication requires the literal migration activation',()=>{
   const env=releaseEntryFixture();assert.equal(combinedEntry(env,source,tree,true).publish,false);
   assert.equal(combinedEntry({...env,LIVE_PUBLICATION_ENABLED:'true'},source,tree,true).publish,false);
