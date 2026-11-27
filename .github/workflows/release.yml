@@ -108,9 +108,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz --output "$RUNNER_TEMP/trivy.tar.gz"
-          printf '%s  %s\n' e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
+          toolchain="$(node scripts/ci-security.mjs toolchain)"
+          read -r trivy_version trivy_sha256 <<< "$toolchain"
+          curl --fail --location --retry 3 "https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/trivy_${trivy_version}_Linux-64bit.tar.gz" --output "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' "$trivy_sha256" "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+          "$RUNNER_TEMP/trivy" version --format json > "$RUNNER_TEMP/trivy-executable-version.json"
+          node scripts/ci-security.mjs scanner-version "$RUNNER_TEMP/trivy-executable-version.json"
           "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --download-db-only
           "$RUNNER_TEMP/trivy" --cache-dir "$RUNNER_TEMP/trivy-cache" version --format json > qualified/scanner-version.json
       - name: Fresh runtime vulnerability and file/configuration secret scan

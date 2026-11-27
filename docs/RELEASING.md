@@ -269,6 +269,26 @@ of publication. Local YAML/contract checks do not establish live bot operation.
 If no update is available, record configuration acceptance separately from pending
 update-PR observation; do not manufacture an update or weaken pins to force one.
 
+## Reviewed scanner identity
+
+`scripts/ci-toolchain.json` is the single active Trivy version/archive-SHA-256
+authority. The maintained workflows and report/freshness validators read it from
+their checked-out source; artifacts, environment variables and resolver outputs
+cannot select another configuration. Keep scanner updates in reviewed PRs with
+the version, official Linux archive identity and checksum coordinated. This
+consolidation preserves Trivy 0.76.0 and its approved archive checksum.
+
+Missing, malformed, ambiguous or unsupported configuration fails closed. Workflows
+authenticate the download before extraction/execution and check the executed
+version before fetching the database. Report versions must match reviewed source.
+The existing vulnerability/secret gates, exact builder dispositions, fresh database
+verification, original 24-hour evidence limit and one-hour promotion limit remain.
+Protected publication uses validators from the authenticated release source after
+owner approval; a packet cannot override their scanner policy. Historical fixed
+fixtures and workflows remain unchanged; interpret historical evidence with its
+original Git source/validators rather than granting it new eligibility. Local
+stub tests do not establish actual hosted scanner installation or execution.
+
 ## Hosted validation and accepted coverage
 
 Local integrity, workflow, Bash and configuration tests do not substitute for

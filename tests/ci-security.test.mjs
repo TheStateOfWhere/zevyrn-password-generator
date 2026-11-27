@@ -1,11 +1,50 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,rm,mkdir,copyFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {assessNpm,assessTrivy,validateBuilderAcceptance,validateRuntimeSBOM,sanitizedRuntimeSBOM,securitySummary} from '../scripts/ci-security.mjs';
+import {assessNpm,assessTrivy,validateBuilderAcceptance,validateRuntimeSBOM,sanitizedRuntimeSBOM,securitySummary,parseCiToolchain,approvedTrivy,validateTrivyVersion} from '../scripts/ci-security.mjs';
+
+test('reviewed Trivy configuration is exact, immutable and rejects malformed or ambiguous identity',()=>{
+  const approved={trivy:{version:'0.76.0',sha256:'e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7'}};
+  assert.deepEqual(parseCiToolchain(JSON.stringify(approved)),approved);assert.deepEqual(approvedTrivy,approved.trivy);
+  assert(Object.isFrozen(approvedTrivy));assert.throws(()=>approvedTrivy.version='0.77.0');
+  for(const value of [undefined,null,{},[],{trivy:null},{trivy:[]},{grype:approved.trivy},
+    {trivy:{...approved.trivy,other:true}},{...approved,other:true},
+    ...[null,1,'','v0.76.0','00.76.0','0.76','0.76.0-rc1','0.76.0+alias','0.76.0;echo nope'].map(version=>({trivy:{...approved.trivy,version}})),
+    ...[null,1,'','abc','A'.repeat(64),'sha256:'+'a'.repeat(64)].map(sha256=>({trivy:{...approved.trivy,sha256}}))])assert.throws(()=>parseCiToolchain(typeof value==='undefined'?value:JSON.stringify(value)),/INVALID_CI_TOOLCHAIN/);
+  for(const text of ['{','{"trivy":{},"trivy":'+JSON.stringify(approved.trivy)+'}',
+    '{"trivy":{"version":"0.77.0","version":"0.76.0","sha256":"'+approved.trivy.sha256+'"}}',
+    JSON.stringify(approved).replace('version','ver\\u0073ion'),JSON.stringify(approved).replace('0.76.0','0.76.\\u0030')])assert.throws(()=>parseCiToolchain(text),/INVALID_CI_TOOLCHAIN/);
+});
+
+test('executed and report scanner versions must match reviewed source, not claimed artifact identity',()=>{
+  validateTrivyVersion({Version:approvedTrivy.version});
+  for(const report of [null,{},[],{Version:1},{Version:'0.77.0'},{Version:'0.76.0 ',trivy:approvedTrivy},Object.create({Version:approvedTrivy.version})])assert.throws(()=>validateTrivyVersion(report),/SCANNER_VERSION_MISMATCH/);
+  const wrong=runtime();wrong.Trivy.Version='0.77.0';wrong.Trivy.approvedIdentity=approvedTrivy;
+  assert.throws(()=>assessTrivy(wrong,'runtime'));
+});
+
+test('toolchain CLI uses only its source file and fails closed on missing, malformed or substituted config',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'zevyrn-toolchain-')),scripts=join(directory,'scripts');await mkdir(scripts);
+  const cli=fileURLToPath(new URL('../scripts/ci-security.mjs',import.meta.url));
+  const invoke=(file,args=[])=>spawnSync(process.execPath,[file,'toolchain',...args],{cwd:directory,encoding:'utf8',env:{...process.env,TRIVY_VERSION:'99.0.0',CI_TOOLCHAIN:join(scripts,'ci-toolchain.json')}});
+  try{
+    await writeFile(join(scripts,'ci-toolchain.json'),JSON.stringify({trivy:{version:'99.0.0',sha256:'a'.repeat(64)}}));
+    assert.equal(invoke(cli).stdout.trim(),approvedTrivy.version+' '+approvedTrivy.sha256);
+    assert.notEqual(invoke(cli,[join(scripts,'ci-toolchain.json')]).status,0);
+    for(const file of ['ci-security.mjs','verify-compiler.mjs','compiler-integrity.json'])await copyFile(new URL('../scripts/'+file,import.meta.url),join(scripts,file));
+    for(const file of ['package.json','package-lock.json'])await copyFile(new URL('../'+file,import.meta.url),join(directory,file));
+    const copy=join(scripts,'ci-security.mjs'),config=join(scripts,'ci-toolchain.json');
+    await writeFile(config,JSON.stringify({trivy:approvedTrivy}));assert.equal(invoke(copy).status,0);
+    for(const text of ['{sensitive-config-fixture','{}','{"trivy":null}','{"trivy":{"version":"bad","sha256":"bad"}}']){
+      await writeFile(config,text);const r=invoke(copy);assert.notEqual(r.status,0);assert(!r.stdout.includes('sensitive-config-fixture')&&!r.stderr.includes('sensitive-config-fixture'));
+    }
+    await rm(config);assert.notEqual(invoke(copy).status,0);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
 
 // Compact fixtures use the actual Trivy 0.76.0 image-report field structure.
 const runtime=()=>({SchemaVersion:2,ArtifactType:'container_image',Trivy:{Version:'0.76.0'},

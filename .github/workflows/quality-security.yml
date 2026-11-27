@@ -129,11 +129,16 @@ jobs:
         id: scanner
         shell: bash
         run: |
+          set -euo pipefail
+          toolchain="$(node scripts/ci-security.mjs toolchain)"
+          read -r trivy_version trivy_sha256 <<< "$toolchain"
           mkdir -p "$RUNNER_TEMP/trivy-bin"
-          curl --fail --location --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz -o "$RUNNER_TEMP/trivy.tar.gz"
-          printf '%s  %s\n' e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7 "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
+          curl --fail --location --retry 3 "https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/trivy_${trivy_version}_Linux-64bit.tar.gz" -o "$RUNNER_TEMP/trivy.tar.gz"
+          printf '%s  %s\n' "$trivy_sha256" "$RUNNER_TEMP/trivy.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/trivy-bin" trivy
           echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/trivy-bin/trivy" version --format json > "$RUNNER_TEMP/trivy-executable-version.json"
+          node scripts/ci-security.mjs scanner-version "$RUNNER_TEMP/trivy-executable-version.json"
           "$RUNNER_TEMP/trivy-bin/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --download-db-only
           "$RUNNER_TEMP/trivy-bin/trivy" --cache-dir "$RUNNER_TEMP/trivy-cache" version --format json > artifacts/security/scanner-version.json
           date --utc --iso-8601=seconds > artifacts/security/scan-start.txt
