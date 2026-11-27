@@ -222,6 +222,53 @@ Historical freshness refresh `45939378824` belongs to source
 The standalone v1.2.3 anonymous Docker Engine pull check remains deferred, not
 passed and nonblocking; a later release's consumer check cannot clear it.
 
+## Weekly dependency maintenance
+
+[Dependabot configuration](../.github/dependabot.yml) checks root npm dependencies,
+Docker base images and GitHub Actions weekly. GitHub's default weekly day is
+Monday, at a GitHub-assigned time. Updates use ordinary individual PRs targeting
+the default branch; no grouping, automatic approval, merging or publication is
+configured. See the [official configuration reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference).
+
+The Actions entry uses documented `exclude-paths`, relative to `/`, for only
+`.github/workflows/publish-qualified-image.yml` and
+`.github/workflows/ghcr-readonly-diagnostic.yml`. Their files and history remain
+intact. `quality-security.yml` and `release.yml` remain eligible, including actions
+also used by the excluded files. Review new full commit SHA pins and their release
+references; do not replace SHA pins with floating tags. Docker PRs require review
+of both tag and immutable digest, supported platform, final runtime metadata,
+package floors and fresh security results. Custom scanner downloads, APK upgrade
+constraints and compiler catalogs are not managed by this configuration.
+
+All dependency PRs must pass the existing application, compiler, Compose,
+container/security, artifact and eight browser gates. npm updates, including
+Playwright, can invalidate the seals on the entire `package.json` and lockfile.
+Use the established reviewed compiler catalog/hash coordination process; compiler
+payload changes also require official artifact-byte verification. Dependabot has
+no catalog regeneration or hash-approval hook. Keep a failed compiler-integrity
+check failed until the approved correction is reviewed; never bypass the gate or
+ignore useful npm updates to hide the coordination requirement. Dependency PRs
+must not increment the application release version or change coordinated image
+metadata, publication activation, source tags or environment eligibility. An
+accepted dependency change still needs separate protected release authorization.
+
+The existing PR workflow uses read-only permissions and authenticated artifacts,
+without registry-write access, protected environments, privileged repository
+secrets or `pull_request_target`. PR evidence remains non-promotable. This
+configuration does not enable Dependabot security updates or alerts; security
+updates were disabled at assessment. Security/notification settings, auto-merge,
+branch protections, rulesets and workflow permissions require separate owner
+authorization and are unchanged here. Public source/images, standard Docker and
+Compose installation and private/internal-network-or-localhost deployment support
+remain unchanged.
+
+After authorized push, require consolidated PR quality. After main integration,
+verify GitHub accepts the configuration, then observe a natural Dependabot job and
+update PR when available, including its read-only quality execution and absence
+of publication. Local YAML/contract checks do not establish live bot operation.
+If no update is available, record configuration acceptance separately from pending
+update-PR observation; do not manufacture an update or weaken pins to force one.
+
 ## Hosted validation and accepted coverage
 
 Local integrity, workflow, Bash and configuration tests do not substitute for
