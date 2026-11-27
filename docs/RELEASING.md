@@ -132,11 +132,16 @@ For a future authorized tag release, the combined path:
 1. Resolves the exact version tag/source/tree from reviewed main history. The
    selected quality run must come from this repository and the active reviewed
    quality workflow revision at that source. Source SHA alone is insufficient.
-2. Selects the newest exact-source main push quality run, without falling back
-   past failure or incomplete execution. Manual selection may explicitly
-   select a successful main manual refresh, but the latest successful exact-source
-   main push CI prerequisite is still independently required. All required jobs
-   must have succeeded in their current attempt.
+2. Selects evidence automatically from exact-source main push and supported main
+   manual-refresh quality executions. Complete, bounded pagination is required.
+   The newest original creation timestamp wins, with run ID as the tie-breaker;
+   updated/upload times never extend validity. The selected run must authenticate
+   and pass all required jobs in its current attempt. Newer failed, expired or
+   invalid evidence blocks release without fallback to an older success.
+   The latest exact-source main push CI prerequisite remains independently
+   required and must succeed, including when a manual refresh supplies evidence.
+   Explicit manual release-recovery selection remains available under separate
+   authorization and receives the same authentication and freshness checks.
 3. Authenticates runtime, builder and browser artifact IDs/checksums and their
    repository, source, workflow, run and attempt bindings. The strict native ZIP
    entry checks run before extraction; retained inventories, OCI blobs, image
@@ -180,7 +185,13 @@ Seven-day artifact retention does not extend the 24-hour eligibility window.
 Missing, expired, ambiguous or mismatched evidence stops execution. Review the
 specific source/run/attempt and diagnostics. If the exact approved source is
 still main, explicitly dispatch the existing quality workflow on main, then
-manually verify that exact refresh run. For an activated, separately authorized
+verify that exact refresh run. Automatic tag selection can use this new main
+refresh while preserving the original successful push-CI prerequisite. A rerun
+of an expired run retains its original creation timestamp and stays expired.
+The accepted refresh `45939378824` is historical evidence for source
+`b422d7b02074ffa0e0148f7770ac87995b6b4ea2`; it cannot qualify this corrected
+source. Fresh exact-source main quality is required after integration.
+For an activated, separately authorized
 release recovery, dispatch `operation: release` from the unchanged version tag
 with that explicit refresh run ID. This reruns quality deliberately; the
 release workflow never silently rebuilds, switches source, selects older runs,
