@@ -21,7 +21,7 @@ COPY compose.zevyrn.yaml compose.zevyrn.traefik.yaml compose.zevyrn.caddy.yaml z
 COPY examples ./examples
 RUN npm test
 
-FROM nginx:1.30.8-alpine@sha256:6437a63b5c529f0e06162b3f593c0154cff6fa2ea0f94fd7c27928cb399e022d AS runtime-rootfs
+FROM nginx:1.31.0-alpine@sha256:2f07d83bf561b506400dc183b1b2003803e39efbd22451f848adaba14d28c7c7 AS runtime-rootfs
 # Upgrade only existing Alpine 3.24 runtime packages requiring newer fixes.
 # Minimum security versions allow newer fixes without changing Alpine branches.
 # Patch libx11 inherited through Nginx's retained image-filter dependencies.
