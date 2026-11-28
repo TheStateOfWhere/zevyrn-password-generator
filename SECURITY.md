@@ -38,6 +38,35 @@ for your deployment. A successful build or earlier clean scan is not proof of
 vulnerability freedom. Do not bypass build tests, float pinned inputs to work
 around errors, or commit secrets and certificate keys.
 
+## Daily monitoring of the published image
+
+The quality workflow schedules an isolated scan of the reviewed published runtime
+at **06:41 UTC** daily. `.github/published-image.json` pins the version, immutable
+source, OCI index, Linux/amd64 manifest and configuration; future accepted releases
+need a reviewed target update. Main's application version and mutable image tags
+cannot substitute another monitoring target. Anonymous digest retrieval uses an
+empty Docker client configuration. The published application is not run or rebuilt.
+
+Monitoring uses the centralized reviewed scanner identity and fresh vulnerability
+intelligence. Runtime HIGH/CRITICAL vulnerabilities and any file or image-config
+secrets block acceptance. Builder exceptions never apply. Image retrieval,
+identity, scanner/database or malformed evidence failures are failures, not clean
+scans. Maintainers review findings and fixes; no automatic remediation, dependency
+update, rebuild, release or deployment is performed.
+
+Distinct non-promotable monitoring reports retain only sanitized identities,
+vulnerability summaries, secret counts and scanner/database information for seven
+days. Raw secret matches, configuration and archives are not uploaded. A monitoring
+run cannot replace PR/main quality or release qualification, and the existing
+weekly source validation remains in place. This adds no deployment requirements
+and does not extend support beyond private/internal networks or localhost.
+
+The scheduled-workflow maintainer must enable GitHub Actions failure notifications
+and check run history; delivery depends on account preferences. GitHub schedules
+can be delayed/dropped and public-repository inactivity can disable them. Daily
+monitoring is best effort, not a guarantee of vulnerability freedom or an alerting
+SLA. See [monitoring and release guidance](docs/RELEASING.md).
+
 ## Published release qualification
 
 The [combined release workflow](.github/workflows/release.yml) qualified and

@@ -8,7 +8,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {gunzipSync} from 'node:zlib';
 import {pathToFileURL} from 'node:url';
-import {validateBuilderAcceptance,approvedTrivy} from './ci-security.mjs';
+import {validateBuilderAcceptance,approvedTrivy,publishedImage,parsePublishedImage,sanitizedPublishedScan,validatePublishedScan,securitySummary} from './ci-security.mjs';
 const builderExceptions=JSON.parse(readFileSync(new URL('./ci-builder-exceptions.json',import.meta.url)));
 export const repository='TheStateOfWhere/zevyrn-password-generator';
 export const repositoryId=1421770645;
@@ -87,7 +87,7 @@ export function qualificationIdentity(env,event,checkedOutCommit) {
   assert(event.inputs?.source_commit===env.GITHUB_SHA&&checkedOutCommit===env.GITHUB_SHA);
   return {purpose:'release',sourceCommit:env.GITHUB_SHA,pullRequest:null,qualityEvent:'push',qualityBranch:'main'};
 }
-export function validateConfig(c,sourceCommit) {
+export function validateConfig(c,sourceCommit,expectedVersion=version) {
   commit(sourceCommit);
   assert(c.os==='linux'&&c.architecture==='amd64');
   const p=c.config;
@@ -96,7 +96,7 @@ export function validateConfig(c,sourceCommit) {
   same(p.Healthcheck.Test,['CMD-SHELL','wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1']);
   assert(p.Healthcheck.Interval===30000000000&&p.Healthcheck.Timeout===3000000000&&p.Healthcheck.StartPeriod===10000000000&&p.Healthcheck.Retries===3);
   same(p.Env,['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','NGINX_VERSION=1.30.8','PKG_RELEASE=1','DYNPKG_RELEASE=1','NJS_VERSION=1.0.2','NJS_RELEASE=1','ACME_VERSION=0.4.2']);
-  assert(p.Labels['org.opencontainers.image.version']===version&&p.Labels['org.opencontainers.image.revision']===sourceCommit&&p.Labels['org.opencontainers.image.source']===sourceURL);
+  assert(p.Labels['org.opencontainers.image.version']===expectedVersion&&p.Labels['org.opencontainers.image.revision']===sourceCommit&&p.Labels['org.opencontainers.image.source']===sourceURL);
   assert(c.rootfs.type==='layers'&&c.rootfs.diff_ids.length>0);c.rootfs.diff_ids.forEach(sha);
 }
 export function inspectGraph(read,names,sourceCommit) {
@@ -201,14 +201,14 @@ export async function verifyRetainedAssets(directory,identity){
   const bytes=await readFile(resolve(directory,'assets.json'));assert(identity.assetsSHA256===hash(bytes));
   const expected=json(bytes),actual=await assetSnapshot(resolve(directory,'assets'));same(actual.files,expected);return expected;
 }
-export function verifyLoaded(identity,image) {
-  validateConfig(identity.config,identity.sourceCommit);
+export function verifyLoaded(identity,image,expectedVersion=version) {
+  validateConfig(identity.config,identity.sourceCommit,expectedVersion);
   sha(identity.configDigest);assert(image.Id===identity.configDigest,'Loaded image ID mismatch');
   assert(image.Os==='linux'&&image.Architecture==='amd64');same(image.RootFS.Layers,identity.diffIDs);
   for(const key of ['User','WorkingDir','StopSignal','Entrypoint','Cmd','ExposedPorts','Env','Labels'])same(image.Config[key],identity.config.config[key]);
   for(const key of ['Test','Interval','Timeout','StartPeriod','Retries'])same(image.Config.Healthcheck[key],identity.config.config.Healthcheck[key]);
 }
-export function inspectDockerGraph(read,names,identity,role='runtime'){
+export function inspectDockerGraph(read,names,identity,role='runtime',expectedVersion=version){
   assert(['runtime','builder'].includes(role));
   const seen=new Set();for(const name of names){const path=name.endsWith('/')?name.slice(0,-1):name;safeAssetPath(path);assert(!seen.has(name));seen.add(name);}
   const manifests=json(read('manifest.json'));assert(Array.isArray(manifests)&&manifests.length===1);
@@ -217,15 +217,15 @@ export function inspectDockerGraph(read,names,identity,role='runtime'){
   if(role==='builder')builderConfigDigest(identity.configDigest,'sha256:'+hash(bytes));
   else assert('sha256:'+hash(bytes)===identity.configDigest);
   const config=json(bytes);same(config,identity.config);
-  if(role==='runtime')validateConfig(config,identity.sourceCommit);
+  if(role==='runtime')validateConfig(config,identity.sourceCommit,expectedVersion);
   else assert(config.os==='linux'&&config.architecture==='amd64'&&config.rootfs.type==='layers');
   assert(Array.isArray(manifest.Layers)&&manifest.Layers.length===identity.diffIDs.length&&new Set(manifest.Layers).size===manifest.Layers.length);
   const diffIDs=manifest.Layers.map(path=>{safeAssetPath(path);assert(seen.has(path));const layer=read(path);return 'sha256:'+hash(layer[0]===0x1f&&layer[1]===0x8b?gunzipSync(layer):layer);});
   same(diffIDs,identity.diffIDs);same(config.rootfs.diff_ids,diffIDs);return identity.configDigest;
 }
-export async function inspectDockerArchive(path,identity){
+export async function inspectDockerArchive(path,identity,expectedVersion=version){
   const names=run('tar',['-tf',path]).toString().trim().split(/\r?\n/);
-  inspectDockerGraph(name=>run('tar',['-xOf',path,name]),names,identity);return hash(await readFile(path));
+  inspectDockerGraph(name=>run('tar',['-xOf',path,name]),names,identity,'runtime',expectedVersion);return hash(await readFile(path));
 }
 export function validateScanIdentity(identity,scan){
   for(const key of ['sourceCommit','sourceTree','archiveSHA256','indexDigest','configDigest','diffIDs'])same(scan[key],identity[key]);
@@ -321,8 +321,11 @@ export function validateQuality(info,jobs,source,qualification={purpose:'release
     assert(qualification.purpose==='release'&&qualification.pullRequest===null&&qualification.qualityEvent==='push'&&qualification.qualityBranch==='main');
     assert(info.head_branch==='main'&&info.event==='push');
   }
-  assert(jobs.total_count===2&&jobs.jobs.length===2);same(jobs.jobs.map(j=>j.name).sort(),['browser','quality-image']);
-  assert(jobs.jobs.every(j=>j.run_id===info.id&&j.run_attempt===info.run_attempt&&j.status==='completed'&&j.conclusion==='success'));
+  assert([2,3].includes(jobs.total_count)&&jobs.jobs.length===jobs.total_count);
+  const monitoring=jobs.jobs.filter(j=>j.name==='published-image'),core=jobs.jobs.filter(j=>j.name!=='published-image');
+  same(core.map(j=>j.name).sort(),['browser','quality-image']);assert(monitoring.length===jobs.total_count-2);
+  assert(jobs.jobs.every(j=>j.run_id===info.id&&j.run_attempt===info.run_attempt&&j.status==='completed'));
+  assert(core.every(j=>j.conclusion==='success')&&monitoring.every(j=>j.conclusion==='skipped'));
 }
 const writeJSON=(path,value)=>writeFile(path,JSON.stringify(value,null,2)+'\n');
 const readJSON=async path=>json(await readFile(path));
@@ -783,8 +786,143 @@ async function combinedRevalidate(root){
   const files=await snapshot(root);delete files['release.json'];delete files['transport.json'];
   validateReleaseReceipt(await readJSON(resolve(root,'release.json')),entry,selection,identity,files,await readJSON(resolve(root,'scanner-version.json')),Date.now(),true);
 }
+export const monitoringSchedule='41 6 * * *';
+export function qualityRoute(event,schedule,ref) {
+  if(event==='schedule')return ref==='refs/heads/main'?(schedule===monitoringSchedule?'monitor':schedule==='23 7 * * 1'?'quality':'reject'):'reject';
+  return ['pull_request','push','workflow_dispatch'].includes(event)&&!schedule?'quality':'reject';
+}
+export function monitoringContext(env,event,source,tree,startedAt) {
+  assert(qualityRoute(env.GITHUB_EVENT_NAME,event.schedule,env.GITHUB_REF)==='monitor');
+  assert(env.GITHUB_REPOSITORY===repository&&event.repository?.id===repositoryId);
+  assert(env.GITHUB_REF==='refs/heads/main'&&env.GITHUB_SHA===source);
+  assert(env.GITHUB_WORKFLOW_REF===`${repository}/${qualityWorkflow}@refs/heads/main`);
+  commit(source);commit(tree);const runId=Number(env.GITHUB_RUN_ID),runAttempt=Number(env.GITHUB_RUN_ATTEMPT);positive(runId);positive(runAttempt);
+  assert(typeof startedAt==='string'&&Number.isFinite(Date.parse(startedAt)));
+  return {repository,repositoryId,workflow:qualityWorkflow,sourceCommit:source,sourceTree:tree,runId,runAttempt,event:'schedule',schedule:monitoringSchedule,startedAt};
+}
+export function publishedMetadata(indexBytes,manifestBytes,configBytes,target) {
+  parsePublishedImage(JSON.stringify(target));
+  assert('sha256:'+hash(indexBytes)===target.indexDigest);
+  const index=json(indexBytes);assert(index.schemaVersion===2&&index.mediaType===indexType&&Array.isArray(index.manifests));
+  const matches=index.manifests.filter(d=>d.platform?.os==='linux'&&d.platform?.architecture==='amd64');assert(matches.length===1);
+  const selected=matches[0];assert(!selected.platform.variant&&selected.mediaType===manifestType&&selected.digest===target.platformDigest);
+  assert(selected.size===manifestBytes.length&&'sha256:'+hash(manifestBytes)===target.platformDigest);
+  const manifest=json(manifestBytes);assert(manifest.schemaVersion===2&&manifest.mediaType===manifestType);
+  assert(manifest.config.mediaType===configType&&manifest.config.digest===target.configDigest&&manifest.config.size===configBytes.length);
+  assert('sha256:'+hash(configBytes)===target.configDigest);
+  const config=json(configBytes);validateConfig(config,target.sourceCommit,target.version);
+  assert(Array.isArray(manifest.layers)&&manifest.layers.length===config.rootfs.diff_ids.length);
+  for(const layer of manifest.layers){sha(layer.digest);assert(layer.mediaType==='application/vnd.oci.image.layer.v1.tar+gzip'&&Number.isSafeInteger(layer.size)&&layer.size>0);}
+  return {version:target.version,sourceCommit:target.sourceCommit,indexDigest:target.indexDigest,platformDigest:target.platformDigest,configDigest:target.configDigest,diffIDs:config.rootfs.diff_ids,config};
+}
+export function publishedSourceTag(text,target) {
+  const refs=text.trim().split(/\r?\n/).map(line=>line.split(/\s+/));
+  assert(refs.length>=1&&refs.length<=2);assert(refs.every(r=>r.length===2));assert(refs.every(([value,ref])=>/^[0-9a-f]{40}$/.test(value)&&[`refs/tags/v${target.version}`,`refs/tags/v${target.version}^{}`].includes(ref)));
+  assert(refs.filter(([,ref])=>ref===`refs/tags/v${target.version}`).length===1);
+  const peeled=refs.filter(([,ref])=>ref.endsWith('^{}'));assert(peeled.length<=1);assert((peeled[0]??refs[0])[0]===target.sourceCommit);
+}
+// Only public anonymous bearer negotiation. Tokens and response bodies never enter diagnostics.
+export async function retrievePublishedMetadata(target=publishedImage(),request=fetch) {
+  parsePublishedImage(JSON.stringify(target));
+  const get=async(url,headers={})=>{
+    const response=await request(url,{headers,signal:AbortSignal.timeout(60000)});assert(response.ok,'Published registry retrieval failed');
+    const chunks=[];let size=0;for await(const chunk of response.body){size+=chunk.length;assert(size<=1024*1024,'Oversized registry metadata');chunks.push(chunk);}
+    return Buffer.concat(chunks);
+  };
+  const credentials=json(await get('https://ghcr.io/token?service=ghcr.io&scope=repository:thestateofwhere/zevyrn:pull'));
+  assert(typeof credentials.token==='string'&&credentials.token.length>0);
+  const headers={Authorization:'Bearer '+credentials.token,Accept:indexType+', '+manifestType};
+  const prefix='https://ghcr.io/v2/thestateofwhere/zevyrn/';
+  const index=await get(prefix+'manifests/'+target.indexDigest,headers);
+  // Fetch only reviewed digests, never locations supplied by a response.
+  const manifest=await get(prefix+'manifests/'+target.platformDigest,headers),config=await get(prefix+'blobs/'+target.configDigest,headers);
+  return {index,manifest,config,identity:publishedMetadata(index,manifest,config,target)};
+}
+const monitorStageNames=['init','retrieval','scanner','scan'];
+const monitorPolicy={blockingSeverities:['HIGH','CRITICAL'],secretLimit:0,runtimeDispositions:false};
+const monitorKeys=(value,keys)=>{assert(value&&typeof value==='object'&&!Array.isArray(value));same(Object.keys(value).sort(),[...keys].sort());};
+function monitorScanner(scanner,startedAt,now,fresh=true) {
+  monitorKeys(scanner,['Version','VulnerabilityDB','archiveSHA256','databaseSHA256']);
+  same(scanner,{...sanitizedScannerMetadata(scanner),archiveSHA256:approvedTrivy.sha256,databaseSHA256:scanner.databaseSHA256});
+  assert(hex.test(scanner.databaseSHA256));if(fresh)releaseFreshness(startedAt,scanner,now);
+}
+export function validateMonitoringEvidence(record,context,target,now=Date.now()) {
+  monitorKeys(record,['schemaVersion','purpose','promotionEligible','context','target','identity','scannerPolicy','scanner','scan','policy','stages','result','classification','completedAt']);
+  assert(record.schemaVersion===1&&record.purpose==='published-monitoring'&&record.promotionEligible===false);
+  same(record.context,context);same(record.target,target);parsePublishedImage(JSON.stringify(target));same(record.policy,monitorPolicy);same(record.scannerPolicy,approvedTrivy);
+  monitorKeys(context,['repository','repositoryId','workflow','sourceCommit','sourceTree','runId','runAttempt','event','schedule','startedAt']);
+  assert(context.repository===repository&&context.repositoryId===repositoryId&&context.workflow===qualityWorkflow&&context.event==='schedule'&&context.schedule===monitoringSchedule);
+  commit(context.sourceCommit);commit(context.sourceTree);positive(context.runId);positive(context.runAttempt);
+  const start=Date.parse(context.startedAt),end=Date.parse(record.completedAt);assert(Number.isFinite(start)&&Number.isFinite(end)&&start<=end&&end<=now&&now-start<=86400000);
+  monitorKeys(record.stages,monitorStageNames);assert(Object.values(record.stages).every(v=>['success','failure','skipped','cancelled'].includes(v)));
+  if(record.identity){
+    monitorKeys(record.identity,['version','sourceCommit','indexDigest','platformDigest','configDigest','diffIDs','scanArchiveSHA256']);
+    for(const key of ['version','sourceCommit','indexDigest','platformDigest','configDigest'])same(record.identity[key],target[key]);
+    assert(Array.isArray(record.identity.diffIDs)&&record.identity.diffIDs.length>0);record.identity.diffIDs.forEach(sha);assert(hex.test(record.identity.scanArchiveSHA256));
+  }
+  if(record.scanner)monitorScanner(record.scanner,context.startedAt,now,record.result==='success');
+  if(record.scan){validatePublishedScan(record.scan);assert(record.identity&&record.scan.imageID===record.identity.configDigest);}
+  const passed=monitorStageNames.every(k=>record.stages[k]==='success')&&!!record.identity&&!!record.scanner&&!!record.scan&&!record.scan.blocked;
+  assert(['success','failure'].includes(record.result)&&passed===(record.result==='success'));
+  const classification=record.stages.init!=='success'?'CONTEXT_FAILURE':record.stages.retrieval!=='success'?'IMAGE_RETRIEVAL_OR_IDENTITY_FAILURE':record.stages.scanner!=='success'?'SCANNER_OR_DATABASE_FAILURE':record.scan?.secrets?'SECRET_FINDING':record.scan?.blocked?'VULNERABILITY_POLICY':!passed?'SCAN_OR_EVIDENCE_FAILURE':'ACCEPTED';
+  assert(record.classification===classification);return record;
+}
+async function currentMonitoringContext(startedAt) {
+  return monitoringContext(process.env,await readJSON(process.env.GITHUB_EVENT_PATH),run('git',['rev-parse','HEAD']).toString().trim(),run('git',['rev-parse','HEAD^{tree}']).toString().trim(),startedAt);
+}
+async function monitorIdentity(directory) {
+  const target=publishedImage();return publishedMetadata(await readFile(resolve(directory,'index.json')),await readFile(resolve(directory,'manifest.json')),await readFile(resolve(directory,'config.json')),target);
+}
+async function monitorCommand(mode,args) {
+  const target=publishedImage();
+  if(mode==='monitor-init'){
+    assert(args.length===1);await mkdir(args[0],{recursive:true});await writeJSON(resolve(args[0],'context.json'),await currentMonitoringContext(new Date().toISOString()));
+  }else if(mode==='monitor-retrieve'){
+    assert(args.length===1);const directory=args[0],ctx=await readJSON(resolve(directory,'context.json'));same(await currentMonitoringContext(ctx.startedAt),ctx);
+    assert(typeof process.env.DOCKER_CONFIG==='string'&&process.env.DOCKER_CONFIG.length>0);
+    const client=resolve(process.env.DOCKER_CONFIG,'config.json');assert((await lstat(client)).isFile()&&!(await lstat(client)).isSymbolicLink());same(await readJSON(client),{});
+    const metadata=await retrievePublishedMetadata(target);
+    publishedSourceTag(run('git',['-c','credential.helper=','ls-remote','--exit-code',sourceURL+'.git',`refs/tags/v${target.version}`,`refs/tags/v${target.version}^{}`]).toString(),target);
+    for(const name of ['index','manifest','config'])await writeFile(resolve(directory,name+'.json'),metadata[name]);
+    run('docker',['pull','--platform',target.platform,target.image+'@'+target.indexDigest]);
+    const images=json(run('docker',['image','inspect',target.configDigest]));assert(images.length===1);verifyLoaded(metadata.identity,images[0],target.version);
+    assert(images[0].RepoDigests?.includes(target.image+'@'+target.indexDigest));
+    run('docker',['image','save','--output',resolve(directory,'scan.tar'),target.configDigest]);
+    const scanArchiveSHA256=await inspectDockerArchive(resolve(directory,'scan.tar'),metadata.identity,target.version);
+    const {config,...identity}=metadata.identity;await writeJSON(resolve(directory,'identity.json'),{...identity,scanArchiveSHA256});
+  }else if(mode==='monitor-scanner'){
+    assert(args.length===3);const [directory,versionFile,database]=args,ctx=await readJSON(resolve(directory,'context.json'));
+    const scanner={...sanitizedScannerMetadata(await readJSON(versionFile)),archiveSHA256:approvedTrivy.sha256,databaseSHA256:hash(await readFile(database))};
+    monitorScanner(scanner,ctx.startedAt,Date.now());await writeJSON(resolve(directory,'scanner.json'),scanner);
+  }else if(mode==='monitor-scan'){
+    assert(args.length===2);const [directory,scanner]=args,identity=await monitorIdentity(directory),record=await readJSON(resolve(directory,'identity.json')),ctx=await readJSON(resolve(directory,'context.json'));
+    monitorScanner(await readJSON(resolve(directory,'scanner.json')),ctx.startedAt,Date.now());
+    const {config,...expected}=identity;same(record,{...expected,scanArchiveSHA256:record.scanArchiveSHA256});
+    assert(await inspectDockerArchive(resolve(directory,'scan.tar'),identity,target.version)===record.scanArchiveSHA256);
+    const output=resolve(directory,'raw-scan.json');run(scanner,runtimeScanArgs(resolve(directory,'scan.tar'),output));
+    assert(hash(await readFile(resolve(directory,'scan.tar')))===record.scanArchiveSHA256);
+    const summary=sanitizedPublishedScan(await readJSON(output),identity);validatePublishedScan(summary);await writeJSON(resolve(directory,'scan.json'),summary);
+    assert(!summary.blocked,'Published runtime security policy failed');
+  }else if(mode==='monitor-finalize'){
+    assert(args.length===3);const [directory,destination,stageJSON]=args,stages=JSON.parse(stageJSON);monitorKeys(stages,monitorStageNames);
+    for(const key of monitorStageNames)if(stages[key]==='')stages[key]='skipped';
+    let context;try{context=await readJSON(resolve(directory,'context.json'));same(await currentMonitoringContext(context.startedAt),context);}catch{stages.init='failure';context=await currentMonitoringContext(new Date().toISOString());}
+    const record={schemaVersion:1,purpose:'published-monitoring',promotionEligible:false,context,target,identity:null,scannerPolicy:approvedTrivy,scanner:null,scan:null,policy:monitorPolicy,stages,result:'failure',classification:'SCAN_OR_EVIDENCE_FAILURE',completedAt:new Date().toISOString()};
+    try{record.identity=await readJSON(resolve(directory,'identity.json'));const {config,...expected}=await monitorIdentity(directory);same(record.identity,{...expected,scanArchiveSHA256:record.identity.scanArchiveSHA256});assert(hex.test(record.identity.scanArchiveSHA256));}catch{record.identity=null;if(stages.retrieval==='success')stages.retrieval='failure';}
+    try{record.scanner=await readJSON(resolve(directory,'scanner.json'));monitorScanner(record.scanner,context.startedAt,Date.now());}catch{record.scanner=null;if(stages.scanner==='success')stages.scanner='failure';}
+    try{record.scan=await readJSON(resolve(directory,'scan.json'));validatePublishedScan(record.scan);assert(record.identity&&record.scan.imageID===record.identity.configDigest);}catch{record.scan=null;if(stages.scan==='success')stages.scan='failure';}
+    const passed=Object.values(stages).every(v=>v==='success')&&record.identity&&record.scanner&&record.scan&&!record.scan.blocked;
+    record.result=passed?'success':'failure';record.classification=stages.init!=='success'?'CONTEXT_FAILURE':stages.retrieval!=='success'?'IMAGE_RETRIEVAL_OR_IDENTITY_FAILURE':stages.scanner!=='success'?'SCANNER_OR_DATABASE_FAILURE':record.scan?.secrets?'SECRET_FINDING':record.scan?.blocked?'VULNERABILITY_POLICY':!passed?'SCAN_OR_EVIDENCE_FAILURE':'ACCEPTED';
+    validateMonitoringEvidence(record,context,target);
+    await mkdir(destination,{recursive:true});await writeJSON(resolve(destination,'monitoring.json'),record);
+    const summary=`## Published-image monitoring\n\n${record.classification}; result=${record.result}; promotionEligible=false\n\n${target.image}@${target.indexDigest}\n`+securitySummary(record.scan?{runtime:record.scan}:{},record.scanner,{},['runtime'],{runtime:target.configDigest});
+    await writeFile(resolve(destination,'summary.md'),summary);if(process.env.GITHUB_STEP_SUMMARY)await writeFile(process.env.GITHUB_STEP_SUMMARY,summary,{flag:'a'});
+    assert(passed,'Published monitoring did not pass');
+  }else throw Error('Unsupported monitoring operation');
+}
 async function main() {
   const [mode,...args]=process.argv.slice(2);
+  if(mode.startsWith('monitor-')){await monitorCommand(mode,args);return;}
   const builderContext=()=>{const ctx=context();assert(ctx.purpose==='quality'&&process.env.GITHUB_REF==='refs/heads/main'&&['push','workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME));return ctx;};
   if(mode==='inspect-builder')await builderCheck('oci-export',args[2],async()=>{
     const ctx=builderContext(),inspected=await inspectBuilderArchive(args[0]);
@@ -947,7 +1085,17 @@ const combinedFailureHints={
 };
 const publicReleaseErrors=new Set(['Live tag publication is disabled pending separate authorization','Reused main evidence expired: explicitly refresh main quality','Selected main quality evidence expired','Approval exceeded promotion database freshness: new qualification and approval required','Release database predates this release attempt','Source metadata does not match release guard','No exact-source main push quality run; do not substitute another source',...['runtime','builder','browser'].map(role=>`Missing or ambiguous ${role} artifact: run current main quality explicitly`)]);
 publicReleaseErrors.add('No exact-source main quality evidence; explicitly refresh quality on the approved main source');
-if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{
+if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(async error=>{
+  if(process.argv[2]==='monitor-finalize'&&process.argv[4]){
+    // A broken source target/context must still leave a constant, safe failure
+    // diagnostic. It is deliberately not a valid successful monitoring record.
+    const destination=process.argv[4];
+    try{await lstat(resolve(destination,'monitoring.json'));}catch{
+      await mkdir(destination,{recursive:true});
+      await writeJSON(resolve(destination,'monitoring.json'),{schemaVersion:1,purpose:'published-monitoring-diagnostic',promotionEligible:false,result:'failure',classification:'MONITORING_EVIDENCE_INVALID'});
+      await writeFile(resolve(destination,'summary.md'),'## Published-image monitoring\n\nMONITORING_EVIDENCE_INVALID; result=failure; promotionEligible=false\n');
+    }
+  }
   console.error(diagnosticCode(error));
   if(builderFailureDetails.has(error))console.error(JSON.stringify(builderFailureDetails.get(error)));
   const hint=combinedFailureHints[process.argv[2]];

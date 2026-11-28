@@ -289,6 +289,49 @@ fixtures and workflows remain unchanged; interpret historical evidence with its
 original Git source/validators rather than granting it new eligibility. Local
 stub tests do not establish actual hosted scanner installation or execution.
 
+## Daily published-image security monitoring
+
+The quality workflow also has an isolated daily job at **06:41 UTC** (`41 6 * * *`).
+Only this job runs on that schedule. The existing Monday 07:23 UTC source builds,
+PR/main validation and ordinary manual quality runs remain separate, with the
+monitoring job skipped. Its concurrency lane cannot cancel source validation.
+
+The reviewed target is `.github/published-image.json`: public v1.2.4, published
+source `7459eb85141be8f8ac7745fd180ec3a9b71e0e34`, Linux/amd64 OCI index
+`sha256:936ad9a0f9221475fb7864823ad349319a05b2f166024b5a36f7ec23f729ff76`.
+Platform-manifest and configuration pins come from the accepted release evidence.
+Future accepted releases require a reviewed target update; neither main's version
+nor a mutable registry tag automatically selects a new target.
+
+An empty Docker client configuration and anonymous registry reads retrieve the
+immutable digest. Source tag, manifest/configuration hashes, labels, platform and
+ordered filesystem identities must match before scanning the authenticated
+Docker-save archive. The application container is not run. The job uses the
+source-relative centralized Trivy pin, verifies downloaded bytes before executing
+and executed version before acquiring a fresh database. Runtime HIGH/CRITICAL
+findings or file/configuration secrets fail acceptance; no builder dispositions
+apply. Retrieval, identity, scanner, database and malformed-evidence failures also
+fail visibly. Maintainers review new findings and suitable fixes through ordinary
+review; monitoring never rebuilds, updates dependencies, remediates or publishes.
+
+Artifacts contain only `monitoring.json` and `summary.md`, with a distinct
+`published-monitoring` purpose and `promotionEligible:false`, or a constant failure
+diagnostic if source/context validation prevents a complete record. Source workflow
+identity is separate from the published image identity. Retention is seven days,
+matching existing quality diagnostics. Raw configuration, image archives, scanner
+matches and authentication material remain temporary and are never uploaded.
+Monitoring cannot satisfy source quality or release qualification. Legacy two-job
+quality evidence remains supported; new ordinary runs require the exact additional
+monitoring job to be completed/skipped while both core jobs succeed.
+
+The cron maintainer must enable appropriate GitHub Actions failure notifications;
+notifications do not automatically reach every maintainer. GitHub schedules are
+best effort and may be delayed or dropped; inactivity can disable scheduled
+workflows in public repositories. Check run history and notification preferences.
+First actual scheduled-run acceptance must verify anonymous retrieval, real scanner
+execution, fresh intelligence, sanitized artifacts and measured time/storage. Local
+synthetic tests establish neither live registry access nor scheduled execution.
+
 ## Hosted validation and accepted coverage
 
 Local integrity, workflow, Bash and configuration tests do not substitute for

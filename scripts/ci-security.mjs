@@ -34,6 +34,53 @@ export function validateTrivyVersion(report) {
   if(!report||Array.isArray(report)||!Object.hasOwn(report,'Version')||report.Version!==approvedTrivy.version)
     throw Error('SCANNER_VERSION_MISMATCH: executed or reported scanner differs from reviewed source');
 }
+export function parsePublishedImage(text) {
+  try {
+    const value=JSON.parse(text);
+    if(!value||Array.isArray(value)||Object.keys(value).sort().join(',')!=='configDigest,image,indexDigest,platform,platformDigest,sourceCommit,version'
+      ||value.image!=='ghcr.io/thestateofwhere/zevyrn'||value.platform!=='linux/amd64'
+      ||typeof value.version!=='string'||!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value.version)
+      ||typeof value.sourceCommit!=='string'||!/^[0-9a-f]{40}$/.test(value.sourceCommit)
+      ||!['indexDigest','platformDigest','configDigest'].every(k=>typeof value[k]==='string'&&/^sha256:[0-9a-f]{64}$/.test(value[k]))
+      ||text.replace(/[ \t\r\n]/g,'')!==JSON.stringify(value))throw Error();
+    return Object.freeze(value);
+  }catch{throw Error('INVALID_PUBLISHED_IMAGE: reviewed monitoring target is invalid');}
+}
+// Lazy: ordinary source/container checks do not need this monitoring-only file.
+export function publishedImage() {
+  try {
+    if(arguments.length)throw Error();
+    const file=new URL('../.github/published-image.json',import.meta.url),stat=lstatSync(file);
+    if(!stat.isFile()||stat.isSymbolicLink())throw Error();
+    return parsePublishedImage(readFileSync(file,'utf8'));
+  }catch{throw Error('INVALID_PUBLISHED_IMAGE: source-relative monitoring target unavailable');}
+}
+export function sanitizedPublishedScan(raw,identity) {
+  const assessment=assessTrivy(raw,'runtime');
+  if(raw.Metadata.ImageID!==identity.configDigest||JSON.stringify(raw.Metadata.DiffIDs)!==JSON.stringify(identity.diffIDs))throw Error('Published scan image mismatch');
+  return {imageID:identity.configDigest,blocked:assessment.blocked,blockingVulnerabilities:assessment.blockingVulnerabilities,secrets:assessment.secrets,
+    results:assessment.results.map(result=>({type:result.type==='alpine'?'alpine':'secret',vulnerabilities:result.vulnerabilities.map(v=>({
+      id:/^CVE-\d{4}-\d{4,}$/.test(v.id)?v.id:'unavailable',severity:v.severity.toUpperCase(),package:safe(v.package),installed:safe(v.installed),fixed:safe(v.fixed)
+    }))}))};
+}
+export function validatePublishedScan(summary) {
+  const keys=(v,n)=>{if(!v||Object.keys(v).sort().join(',')!==[...n].sort().join(','))throw Error('Invalid monitoring scan');};
+  keys(summary,['imageID','blocked','blockingVulnerabilities','secrets','results']);
+  if(!/^sha256:[0-9a-f]{64}$/.test(summary.imageID)||typeof summary.blocked!=='boolean'
+    ||!Number.isSafeInteger(summary.secrets)||summary.secrets<0||!Array.isArray(summary.results)||!summary.results.length)throw Error('Invalid monitoring scan');
+  let blocking=0,os=0;
+  for(const result of summary.results){
+    keys(result,['type','vulnerabilities']);if(!['alpine','secret'].includes(result.type)||!Array.isArray(result.vulnerabilities))throw Error('Invalid monitoring scan');
+    if(result.type==='alpine')os++;
+    for(const v of result.vulnerabilities){
+      keys(v,['id','severity','package','installed','fixed']);
+      if(!['UNKNOWN','LOW','MEDIUM','HIGH','CRITICAL'].includes(v.severity)||!(v.id==='unavailable'||/^CVE-\d{4}-\d{4,}$/.test(v.id))
+        ||!['package','installed','fixed'].every(k=>typeof v[k]==='string'&&safe(v[k])===v[k]))throw Error('Invalid monitoring scan');
+      if(['HIGH','CRITICAL'].includes(v.severity))blocking++;
+    }
+  }
+  if(os!==1||summary.blockingVulnerabilities!==blocking||summary.blocked!==(blocking>0||summary.secrets>0))throw Error('Invalid monitoring counts');
+}
 const requiredNode=[
   {name:'@typescript/typescript6',version:'6.0.2',path:'app/node_modules/@typescript/typescript6/package.json'},
   {name:'typescript',version:'6.0.3',path:'app/node_modules/@typescript/old/package.json'},
@@ -203,6 +250,10 @@ async function main() {
   const readJSON=async path=>JSON.parse(await readFile(path,'utf8'));
   const writeJSON=async(path,value)=>{await mkdir(dirname(path),{recursive:true});await writeFile(path,JSON.stringify(value,null,2)+'\n');};
   const policy=async()=>readJSON(new URL('./ci-builder-exceptions.json',import.meta.url));
+  if(kind==='published-reference') {
+    if(pairs.length)throw Error('Published target cannot be overridden');
+    const target=publishedImage();console.log(target.image+'@'+target.indexDigest);return;
+  }
   if(kind==='toolchain') {
     if(pairs.length)throw Error('Toolchain authority cannot be overridden');
     console.log(approvedTrivy.version+' '+approvedTrivy.sha256);return;

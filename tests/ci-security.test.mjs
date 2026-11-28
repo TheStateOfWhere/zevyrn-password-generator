@@ -6,6 +6,33 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {assessNpm,assessTrivy,validateBuilderAcceptance,validateRuntimeSBOM,sanitizedRuntimeSBOM,securitySummary,parseCiToolchain,approvedTrivy,validateTrivyVersion} from '../scripts/ci-security.mjs';
+import {parsePublishedImage,publishedImage,sanitizedPublishedScan,validatePublishedScan} from '../scripts/ci-security.mjs';
+import {existsSync} from 'node:fs';
+
+const publishedFixture=()=>({image:'ghcr.io/thestateofwhere/zevyrn',version:'1.2.4',sourceCommit:'a'.repeat(40),indexDigest:'sha256:'+'b'.repeat(64),platform:'linux/amd64',platformDigest:'sha256:'+'c'.repeat(64),configDigest:'sha256:'+'d'.repeat(64)});
+test('published configuration rejects malformed fields, aliases, duplicate keys and mutable references',()=>{
+  const f=publishedFixture();assert.deepEqual(parsePublishedImage(JSON.stringify(f)),f);assert(Object.isFrozen(parsePublishedImage(JSON.stringify(f))));
+  for(const change of [x=>x.image+=':latest',x=>x.image+='@'+x.indexDigest,x=>x.image='other/image',x=>x.platform='linux/arm64',x=>x.version='v1.2.4',x=>x.version='01.2.4',x=>x.sourceCommit='x'.repeat(40),x=>x.indexDigest='latest',x=>x.configDigest='sha256:'+'A'.repeat(64),x=>delete x.platformDigest,x=>x.override=true]){
+    const t=structuredClone(f);change(t);assert.throws(()=>parsePublishedImage(JSON.stringify(t)),/INVALID_PUBLISHED_IMAGE/);
+  }
+  for(const text of ['null','[]','{',JSON.stringify(f).replace('"version":"1.2.4"','"version":"1.0.0","version":"1.2.4"'),JSON.stringify(f).replace('sourceCommit','source\\u0043ommit')])assert.throws(()=>parsePublishedImage(text));
+});
+test('published scan sanitization retains vulnerabilities and counts but never secret targets or raw fields',()=>{
+  const raw=runtime(),identity={configDigest:raw.Metadata.ImageID,diffIDs:['sha256:'+'f'.repeat(64)]};raw.Metadata.DiffIDs=identity.diffIDs;
+  raw.Results[0].Target='raw-secret-fixture';raw.Results[0].Secrets=[{RuleID:'raw-secret-fixture',Match:'raw-secret-fixture',Code:{Lines:['raw-secret-fixture']}}];
+  raw.Results[0].Vulnerabilities=[{VulnerabilityID:'CVE-2099-12345',Severity:'HIGH',PkgName:'nginx',InstalledVersion:'1',FixedVersion:'2',Description:'raw-secret-fixture'}];
+  const summary=sanitizedPublishedScan(raw,identity);validatePublishedScan(summary);assert(summary.blocked);assert.equal(summary.secrets,1);assert.equal(summary.blockingVulnerabilities,1);assert(!JSON.stringify(summary).includes('raw-secret-fixture'));
+  for(const change of [x=>x.secrets=-1,x=>x.blocked=false,x=>x.blockingVulnerabilities=0,x=>x.results[0].target='raw-secret-fixture',x=>x.results[0].vulnerabilities[0].exception={},x=>x.results[0].vulnerabilities[0].package='<script>']){const s=structuredClone(summary);change(s);assert.throws(()=>validatePublishedScan(s));}
+  for(const change of [x=>x.Metadata.ImageID='sha256:'+'e'.repeat(64),x=>x.Metadata.DiffIDs=[],x=>x.Trivy.Version='99.0.0',x=>x.Results=[],x=>x.Errors=['raw-secret-fixture']]){const r=structuredClone(raw);change(r);assert.throws(()=>sanitizedPublishedScan(r,identity));}
+});
+test('published reference CLI ignores environment and cwd substitutions and accepts no target override', {skip:!existsSync('.github/published-image.json')&&'Reviewed target exists on source checkout'},async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'zevyrn-published-authority-')),cli=fileURLToPath(new URL('../scripts/ci-security.mjs',import.meta.url));
+  try{
+    await mkdir(join(dir,'.github'));await writeFile(join(dir,'.github/published-image.json'),JSON.stringify(publishedFixture()));
+    const target=publishedImage(),invoke=args=>spawnSync(process.execPath,[cli,'published-reference',...args],{cwd:dir,encoding:'utf8',env:{...process.env,PUBLISHED_IMAGE:'other/image:latest',PUBLISHED_IMAGE_CONFIG:join(dir,'.github/published-image.json')}});
+    assert.equal(invoke([]).stdout.trim(),target.image+'@'+target.indexDigest);assert.notEqual(invoke([join(dir,'.github/published-image.json')]).status,0);assert.throws(()=>publishedImage('override'));
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
 
 test('reviewed Trivy configuration is exact, immutable and rejects malformed or ambiguous identity',()=>{
   const approved={trivy:{version:'0.76.0',sha256:'e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7'}};
