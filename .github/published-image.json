@@ -1,0 +1,9 @@
+{
+  "image": "ghcr.io/thestateofwhere/zevyrn",
+  "version": "1.2.4",
+  "sourceCommit": "7459eb85141be8f8ac7745fd180ec3a9b71e0e34",
+  "indexDigest": "sha256:936ad9a0f9221475fb7864823ad349319a05b2f166024b5a36f7ec23f729ff76",
+  "platform": "linux/amd64",
+  "platformDigest": "sha256:ca7196169d63e56d0267d18376629c2a10a827d6270fbed6c1f1541cdb08845f",
+  "configDigest": "sha256:b5c3f42a0d219476e8882c623ea8ca6a9c4d1a041260d24148bdc9103c7f7736"
+}

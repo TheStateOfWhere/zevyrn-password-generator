@@ -1,5 +1,7 @@
 import {test} from 'node:test';
 import {resolveQualitySelection} from '../scripts/release-integrity.mjs';
+import {qualityRoute,monitoringSchedule,monitoringContext,publishedMetadata,publishedSourceTag,retrievePublishedMetadata,validateMonitoringEvidence} from '../scripts/release-integrity.mjs';
+import {approvedTrivy} from '../scripts/ci-security.mjs';
 import {gzipSync} from 'node:zlib';
 import {Readable} from 'node:stream';
 import {createRequire} from 'node:module';
@@ -12,6 +14,72 @@ import {qualityIdentity,validateQualityArtifact,validateQualityRecord,validateQu
 import {hash,inspectDockerGraph,inspectDockerArchive,validateScanIdentity,validateRuntimeReportIdentity,validateSBOMIdentity,validateCompleteScanEvidence,runtimeScanArgs,sanitizedFailureStages,sanitizedScannerMetadata,sanitizedScanSummary,assetSnapshot,validateRuntimeAssets,verifyRetainedAssets,nginxAssetSHA256,inspectGraph,diagnosticCode,inspectionDiagnostic,sanitizedToolIdentity,qualificationIdentity,validatePacketPurpose,validateConfig,validateRun,validateEvidence,validateTags,validateReleaseRef,validateQuality,verifyLoaded,verifyContainer,repository,repositoryId,suites} from '../scripts/release-integrity.mjs';
 const source='a'.repeat(40),tree='b'.repeat(40),now=Date.UTC(2026,10,16,5),sha='sha256:'+'c'.repeat(64);
 const clone=structuredClone;
+function monitorFixture(changeConfig=()=>{}) {
+  const c=config();changeConfig(c);const configBytes=Buffer.from(JSON.stringify(c));
+  const manifest=Buffer.from(JSON.stringify({schemaVersion:2,mediaType:mt,config:{mediaType:ct,digest:'sha256:'+hash(configBytes),size:configBytes.length},layers:[{mediaType:'application/vnd.oci.image.layer.v1.tar+gzip',digest:sha,size:10}]}));
+  const index=Buffer.from(JSON.stringify({schemaVersion:2,mediaType:it,manifests:[{mediaType:mt,digest:'sha256:'+hash(manifest),size:manifest.length,platform:{os:'linux',architecture:'amd64'}}]}));
+  const target={image:'ghcr.io/thestateofwhere/zevyrn',version:'1.2.4',sourceCommit:source,indexDigest:'sha256:'+hash(index),platform:'linux/amd64',platformDigest:'sha256:'+hash(manifest),configDigest:'sha256:'+hash(configBytes)};
+  return {target,index,manifest,config:configBytes};
+}
+function monitoringRecordFixture() {
+  const f=monitorFixture(),start=new Date(now-600000).toISOString();
+  const env={GITHUB_REPOSITORY:repository,GITHUB_SHA:source,GITHUB_REF:'refs/heads/main',GITHUB_EVENT_NAME:'schedule',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/quality-security.yml@refs/heads/main`,GITHUB_RUN_ID:'42',GITHUB_RUN_ATTEMPT:'2'};
+  const event={repository:{id:repositoryId},schedule:monitoringSchedule},context=monitoringContext(env,event,source,tree,start);
+  const identity=publishedMetadata(f.index,f.manifest,f.config,f.target);delete identity.config;identity.scanArchiveSHA256='c'.repeat(64);
+  const scanner={Version:approvedTrivy.version,VulnerabilityDB:{Version:2,UpdatedAt:start,DownloadedAt:new Date(now-1000).toISOString(),NextUpdate:new Date(now+86400000).toISOString()},archiveSHA256:approvedTrivy.sha256,databaseSHA256:'d'.repeat(64)};
+  const record={schemaVersion:1,purpose:'published-monitoring',promotionEligible:false,context,target:f.target,identity,scannerPolicy:approvedTrivy,scanner,scan:{imageID:identity.configDigest,blocked:false,blockingVulnerabilities:0,secrets:0,results:[{type:'alpine',vulnerabilities:[]}]},policy:{blockingSeverities:['HIGH','CRITICAL'],secretLimit:0,runtimeDispositions:false},stages:{init:'success',retrieval:'success',scanner:'success',scan:'success'},result:'success',classification:'ACCEPTED',completedAt:new Date(now).toISOString()};
+  return {...f,env,event,context,record,check:r=>validateMonitoringEvidence(r??record,context,f.target,now)};
+}
+test('monitor routing permits only exact daily main schedule and preserves weekly and ordinary quality',()=>{
+  assert.equal(qualityRoute('schedule',monitoringSchedule,'refs/heads/main'),'monitor');
+  assert.equal(qualityRoute('schedule','23 7 * * 1','refs/heads/main'),'quality');
+  for(const event of ['pull_request','push','workflow_dispatch'])assert.equal(qualityRoute(event,undefined,'refs/heads/main'),'quality');
+  for(const [event,schedule,ref] of [['schedule','other','refs/heads/main'],['schedule',monitoringSchedule,'refs/tags/v1.2.4'],['push',monitoringSchedule,'refs/heads/main'],['pull_request_target',undefined,'refs/heads/main']])assert.equal(qualityRoute(event,schedule,ref),'reject');
+  const f=monitoringRecordFixture();for(const change of [e=>e.GITHUB_SHA=tree,e=>e.GITHUB_REF='refs/heads/other',e=>e.GITHUB_REPOSITORY='other/repo',e=>e.GITHUB_EVENT_NAME='workflow_dispatch',e=>e.GITHUB_WORKFLOW_REF+='-other',e=>e.GITHUB_RUN_ATTEMPT='0']){const env=clone(f.env);change(env);assert.throws(()=>monitoringContext(env,f.event,source,tree,f.context.startedAt));}
+});
+test('published metadata authenticates digest graph, config, source, version and platform independently of monitoring source',()=>{
+  const f=monitorFixture();assert.equal(publishedMetadata(f.index,f.manifest,f.config,f.target).configDigest,f.target.configDigest);
+  for(const key of ['index','manifest','config']){const g={...f,[key]:Buffer.from('{}')};assert.throws(()=>publishedMetadata(g.index,g.manifest,g.config,g.target));}
+  for(const key of ['indexDigest','platformDigest','configDigest']){const t={...f.target,[key]:sha};assert.throws(()=>publishedMetadata(f.index,f.manifest,f.config,t));}
+  for(const change of [c=>c.os='windows',c=>c.architecture='arm64',c=>c.config.Labels['org.opencontainers.image.version']='1.2.5',c=>c.config.Labels['org.opencontainers.image.revision']=tree,c=>c.config.User='0']){const g=monitorFixture(change);assert.throws(()=>publishedMetadata(g.index,g.manifest,g.config,g.target));}
+  publishedSourceTag(source+'\trefs/tags/v1.2.4',f.target);for(const text of [tree+'\trefs/tags/v1.2.4',source+'\trefs/tags/latest',source+'\trefs/tags/v1.2.4\n'+source+'\trefs/tags/v1.2.4'])assert.throws(()=>publishedSourceTag(text,f.target));
+});
+test('anonymous metadata retrieval uses only reviewed digests and fails on unavailable, substituted or oversized responses (synthetic HTTP)',async()=>{
+  const f=monitorFixture(),calls=[],prefix='https://ghcr.io/v2/thestateofwhere/zevyrn/';
+  const bodies=new Map([[prefix+'manifests/'+f.target.indexDigest,f.index],[prefix+'manifests/'+f.target.platformDigest,f.manifest],[prefix+'blobs/'+f.target.configDigest,f.config]]);
+  const request=async(url,options)=>{calls.push({url,options});return new Response(url.includes('/token?')?'{"token":"synthetic-anonymous-token"}':bodies.get(url),{status:200});};
+  const got=await retrievePublishedMetadata(f.target,request);assert.equal(got.identity.configDigest,f.target.configDigest);assert.equal(calls.length,4);assert(calls.slice(1).every(c=>!c.url.includes(':latest')&&!c.url.includes('/manifests/1.2.4')));
+  assert(calls.slice(1).every(c=>c.options.headers.Authorization==='Bearer synthetic-anonymous-token'));
+  for(const request of [async()=>new Response('unavailable',{status:503}),async()=>{throw Error('network unavailable');},async url=>new Response(url.includes('/token?')?'{"token":"fixture"}':'{}'),async()=>new Response('x'.repeat(1024*1024+1))])await assert.rejects(retrievePublishedMetadata(f.target,request));
+});
+test('strict monitoring evidence rejects stale intelligence, missing coverage, identity substitutions and false success',()=>{
+  const f=monitoringRecordFixture();f.check();
+  for(const change of [r=>r.promotionEligible=true,r=>r.purpose='release',r=>r.unexpected='raw-secret',r=>r.context.runAttempt++,r=>r.context.schedule='other',r=>r.context.sourceCommit=tree,r=>r.target.configDigest=sha,r=>r.identity.configDigest=sha,r=>r.identity.diffIDs=[],r=>r.identity.scanArchiveSHA256='invalid',r=>r.scanner.Version='99.0.0',r=>r.scanner.archiveSHA256='e'.repeat(64),r=>r.scanner.databaseSHA256='bad',r=>r.scanner.VulnerabilityDB.NextUpdate=new Date(now-1).toISOString(),r=>r.scanner.VulnerabilityDB.DownloadedAt=new Date(now-86400000).toISOString(),r=>r.completedAt=new Date(now+1).toISOString(),r=>r.context.startedAt=new Date(now-86400001).toISOString(),r=>r.scan=null,r=>r.scanner=null,r=>r.stages.retrieval='failure',r=>r.scan.blocked=true,r=>r.scan.secrets=1,r=>r.scan.results[0].vulnerabilities=[{id:'CVE-2099-12345',severity:'CRITICAL',package:'nginx',installed:'1',fixed:'2'}]]){const r=clone(f.record);change(r);assert.throws(()=>f.check(r));}
+  for(const [stage,classification] of [['retrieval','IMAGE_RETRIEVAL_OR_IDENTITY_FAILURE'],['scanner','SCANNER_OR_DATABASE_FAILURE'],['scan','SCAN_OR_EVIDENCE_FAILURE']]){const r=clone(f.record);r.stages[stage]='failure';r.result='failure';r.classification=classification;f.check(r);}
+});
+test('monitoring records and scheduled runs cannot enter quality, release or promotion consumers',()=>{
+  const f=monitoringRecordFixture();for(const purpose of ['pr','release'])assert.throws(()=>validatePacketPurpose(f.record,{purpose,pullRequest:purpose==='pr'?1:null}));
+  const main=mainReleaseFixture();main.run.event='schedule';assert.throws(()=>main.check());
+  const e=evidenceFixture();assert.throws(()=>validateQualityRecord(f.record,e.context,{},e.identity));
+  const entry={...f.record.context,publish:true};assert.throws(()=>validateReleaseReceipt(f.record,entry,{},e.identity,{},f.record.scanner,now,true));
+});
+test('ordinary quality accepts historical two-job records and exactly one skipped monitor, rejecting executed or substituted jobs',()=>{
+  const f=mainReleaseFixture();f.check();f.jobs.jobs.push({name:'published-image',run_id:42,run_attempt:2,status:'completed',conclusion:'skipped'});f.jobs.total_count=3;f.check();
+  for(const change of [x=>x.jobs.jobs[2].conclusion='success',x=>x.jobs.jobs[2].conclusion='failure',x=>x.jobs.jobs[2].status='in_progress',x=>x.jobs.jobs[2].run_attempt=1,x=>x.jobs.jobs[2].name='unknown',x=>x.jobs.jobs[0].conclusion='skipped',x=>x.jobs.jobs.pop(),x=>x.jobs.jobs[1].name='quality-image']){const g=clone({run:f.run,jobs:f.jobs,artifacts:f.artifacts,workflow:f.workflow,sourceInfo:f.sourceInfo});change(g);assert.throws(()=>authenticateMainQuality(g.run,g.jobs,g.artifacts,g.workflow,g.sourceInfo,source,now));}
+});
+test('actual monitoring CLI fails closed and retains sanitized diagnostics without image retrieval on failure',{skip:!existsSync('.github/published-image.json')&&'Requires source checkout'},()=>{
+  const directory=mkdtempSync(join(tmpdir(),'zevyrn-monitor-failure-')),event=join(directory,'event.json'),scratch=join(directory,'scratch'),out=join(directory,'evidence');
+  const actualSource=spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim();assert.match(actualSource,/^[0-9a-f]{40}$/);
+  writeFileSync(event,JSON.stringify({repository:{id:repositoryId},schedule:monitoringSchedule}));
+  const env={...process.env,GITHUB_REPOSITORY:repository,GITHUB_SHA:actualSource,GITHUB_REF:'refs/heads/main',GITHUB_EVENT_NAME:'schedule',GITHUB_WORKFLOW_REF:`${repository}/.github/workflows/quality-security.yml@refs/heads/main`,GITHUB_RUN_ID:'42',GITHUB_RUN_ATTEMPT:'1',GITHUB_EVENT_PATH:event};
+  const cli=(...args)=>spawnSync(process.execPath,['scripts/release-integrity.mjs',...args],{env,encoding:'utf8'});
+  assert.equal(cli('monitor-init',scratch).status,0);writeFileSync(join(scratch,'identity.json'),JSON.stringify({secret:'raw-secret-fixture'}));writeFileSync(join(scratch,'scan.json'),JSON.stringify({Match:'raw-secret-fixture'}));
+  const failed=cli('monitor-finalize',scratch,out,JSON.stringify({init:'success',retrieval:'failure',scanner:'skipped',scan:'skipped'}));assert.equal(failed.status,1);
+  const record=JSON.parse(readFileSync(join(out,'monitoring.json')));assert.equal(record.result,'failure');assert.equal(record.classification,'IMAGE_RETRIEVAL_OR_IDENTITY_FAILURE');assert.equal(record.promotionEligible,false);assert(!readFileSync(join(out,'monitoring.json'),'utf8').includes('raw-secret-fixture'));assert(!failed.stderr.includes('raw-secret-fixture'));
+  writeFileSync(event,JSON.stringify({repository:{id:repositoryId},schedule:'unexpected-raw-secret-fixture'}));
+  const fallback=join(directory,'fallback');assert.equal(cli('monitor-finalize',scratch,fallback,'{}').status,1);
+  const diagnostic=JSON.parse(readFileSync(join(fallback,'monitoring.json')));assert.deepEqual(diagnostic,{schemaVersion:1,purpose:'published-monitoring-diagnostic',promotionEligible:false,result:'failure',classification:'MONITORING_EVIDENCE_INVALID'});assert.throws(()=>validatePacketPurpose(diagnostic,{purpose:'release',pullRequest:null}));
+});
 const nginxPage=`<!DOCTYPE html>
 <html>
 <head>
@@ -565,7 +633,7 @@ test('candidate quality validation checks pinned base, patched packages and hard
   assert(steps.findIndex(s=>s.name==='Actionable sanitized security summary')>steps.indexOf(health));
   for(const job of Object.values(quality.jobs)) {
     assert(!job.environment);assert(!JSON.stringify(job).includes('secrets.'));
-    if(job.permissions)assert.deepEqual(job.permissions,{contents:'read',actions:'read'});
+    if(job.permissions)assert([JSON.stringify({contents:'read',actions:'read'}),JSON.stringify({contents:'read'})].includes(JSON.stringify(job.permissions)));
     for(const step of job.steps){
       assert(!/docker (?:push|login)|--push|skopeo login|gh (?:workflow run|release)|ssh\s/.test(step.run??''));
       for(const line of (step.run??'').split('\n').filter(line=>line.includes('skopeo copy')))assert.match(line,/(?:oci-archive:artifacts\/security\/archive\.oci\.tar docker-daemon:zevyrn-ci-runtime:latest|"oci-archive:\$RUNNER_TEMP\/retained-builder\/builder\.oci\.tar" docker-daemon:zevyrn-ci-builder:latest)$/);

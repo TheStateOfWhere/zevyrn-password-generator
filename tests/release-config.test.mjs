@@ -11,9 +11,22 @@ import { createRequire } from 'node:module';
 import { screenshotDirectory } from './browser-artifacts.mjs';
 const read = name => readFile(new URL('../'+name, import.meta.url), 'utf8');
 
+test('daily published monitoring is isolated from weekly, PR, main and manual quality with no publication authority',{skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on source checkout'},async()=>{
+  const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle'),w=yaml.parse(await read('.github/workflows/quality-security.yml'));
+  assert.deepEqual(w.on.schedule,[{cron:'23 7 * * 1'},{cron:'41 6 * * *'}]);assert(!w.on.workflow_dispatch?.inputs);
+  const monitor=w.jobs['published-image'],core=w.jobs['quality-image'];
+  const eligible=(job,event,schedule,ref='refs/heads/main')=>Function('github','return ('+job.if.replace(/^\$\{\{|\}\}$/g,'')+')')({event_name:event,event:{schedule},ref});
+  for(const [event,schedule,ref,expected] of [['schedule','41 6 * * *','refs/heads/main','monitor'],['schedule','23 7 * * 1','refs/heads/main','quality'],['pull_request',undefined,'refs/pull/1/merge','quality'],['push',undefined,'refs/heads/main','quality'],['workflow_dispatch',undefined,'refs/heads/main','quality'],['schedule','other','refs/heads/main','none'],['schedule','41 6 * * *','refs/tags/v1.2.4','none'],['push','41 6 * * *','refs/heads/main','none'],['pull_request_target',undefined,'refs/heads/main','none']]){assert.equal(!!eligible(monitor,event,schedule,ref),expected==='monitor');assert.equal(!!eligible(core,event,schedule,ref),expected==='quality');}
+  assert.equal(w.jobs.browser.needs,'quality-image');assert(!monitor.needs&&!monitor.environment&&!monitor.secrets);assert.deepEqual(monitor.permissions,{contents:'read'});assert(w.concurrency.group.includes('published-monitor'));
+  const script=monitor.steps.map(s=>s.run??'').join('\n');
+  for(const text of ['monitor-init','monitor-retrieve','monitor-scanner','monitor-scan','monitor-finalize','ci-security.mjs toolchain','ci-security.mjs scanner-version','sha256sum --check --strict','--download-db-only',"printf '{}\\n'",'$DOCKER_CONFIG/config.json'])assert(script.includes(text),text);
+  assert(!/docker (?:run|build|push|login)|npm (?:test|ci|run)|--retry|skopeo|workflow run|release\.json|quality-record/.test(script));
+  const retention=monitor.steps.find(s=>s.with?.name?.startsWith('published-monitoring-'));assert.equal(retention.if,'always()');assert.equal(retention.with['retention-days'],core.steps.find(s=>s.with?.name==='security-evidence').with['retention-days']);assert(!/RUNNER_TEMP|raw|\.tar|config\.json|assets\//.test(retention.with.path));assert.equal(monitor.steps.find(s=>s.name==='Retain sanitized non-promotable monitoring outcome').if,'always()');
+});
+
 test('maintained scanner downloads use one source identity and verify bytes and executed version before DB access', {skip:!existsSync('.github/workflows/quality-security.yml')&&'Workflow contracts run on the source checkout'},async()=>{
   const {yaml}=createRequire(import.meta.url)('playwright-core/lib/utilsBundle');
-  for(const [file,job] of [['quality-security','quality-image'],['release','qualify']]){
+  for(const [file,job] of [['quality-security','quality-image'],['release','qualify'],['quality-security','published-image']]){
     const workflow=yaml.parse(await read('.github/workflows/'+file+'.yml')),scanner=workflow.jobs[job].steps.find(s=>s.id==='scanner'),script=scanner.run;
     assert.equal(scanner.shell,'bash');assert(!scanner['continue-on-error']);
     assert(script.includes('toolchain="$(node scripts/ci-security.mjs toolchain)"'));
@@ -39,15 +52,15 @@ test('actual scanner shell blocks reject bad bytes and executed versions before 
   const executable='#!/bin/bash\nset -eu\nif [[ " $* " == *" version "* ]]; then printf "execute-version\\n" >> "$CALLS_FILE"; printf \'{"Version":"%s"}\\n\' "$EXECUTED_VERSION"; else printf "database\\n" >> "$CALLS_FILE"; fi\n';
   // Synthetic transport and executable only. Real sha256sum and the production
   // source-relative version validator execute; no network or real Trivy is used.
-  const controls='curl() { printf "download\\n" >> "$CALLS_FILE"; cp "$FIXTURE_ARCHIVE" "$RUNNER_TEMP/trivy.tar.gz"; }\ntar() { printf "extract\\n" >> "$CALLS_FILE"; }\nnode() { if [[ "$2" == toolchain ]]; then printf "%s %s\\n" "$EXPECTED_VERSION" "$EXPECTED_SHA"; else "$NODE_BIN" "$SOURCE_CLI" "${@:2}"; fi; }\n';
+  const controls='curl() { printf "download\\n" >> "$CALLS_FILE"; cp "$FIXTURE_ARCHIVE" "$RUNNER_TEMP/trivy.tar.gz"; cp "$FIXTURE_ARCHIVE" "$RUNNER_TEMP/monitor-trivy.tar.gz"; }\ntar() { printf "extract\\n" >> "$CALLS_FILE"; }\nnode() { if [[ "$2" == toolchain ]]; then printf "%s %s\\n" "$EXPECTED_VERSION" "$EXPECTED_SHA"; elif [[ "$2" == monitor-scanner ]]; then printf "receipt\\n" >> "$CALLS_FILE"; else "$NODE_BIN" "$SOURCE_CLI" "${@:2}"; fi; }\n';
   try{
-    for(const [file,job] of [['quality-security','quality-image'],['release','qualify']]){
+    for(const [file,job] of [['quality-security','quality-image'],['release','qualify'],['quality-security','published-image']]){
       const script=yaml.parse(await read('.github/workflows/'+file+'.yml')).jobs[job].steps.find(s=>s.id==='scanner').run;
       for(const scenario of ['valid','checksum','version']){
-        const run=join(directory,file+'-'+scenario);await mkdir(join(run,'trivy-bin'),{recursive:true});await mkdir(join(run,'artifacts/security'),{recursive:true});await mkdir(join(run,'qualified'));
+        const run=join(directory,file+'-'+job+'-'+scenario);await mkdir(join(run,'trivy-bin'),{recursive:true});await mkdir(join(run,'monitor-trivy-bin'));await mkdir(join(run,'artifacts/security'),{recursive:true});await mkdir(join(run,'qualified'));
         await writeFile(join(run,'fixture.tar.gz'),fixture);await writeFile(join(run,'calls.txt'),'');
-        for(const path of ['trivy','trivy-bin/trivy'])await writeFile(join(run,path),executable);
-        const result=spawnSync(shell,['-e','-u','-o','pipefail','-c','chmod +x "$RUNNER_TEMP/trivy" "$RUNNER_TEMP/trivy-bin/trivy"\n'+controls+script],{cwd:run,encoding:'utf8',env:{...process.env,RUNNER_TEMP:posix(run),GITHUB_PATH:posix(join(run,'github-path')),FIXTURE_ARCHIVE:posix(join(run,'fixture.tar.gz')),CALLS_FILE:posix(join(run,'calls.txt')),EXPECTED_VERSION:identity.version,EXPECTED_SHA:scenario==='checksum'?'0'.repeat(64):digest,EXECUTED_VERSION:scenario==='version'?'99.0.0':identity.version,NODE_BIN:posix(process.execPath),SOURCE_CLI:posix(fileURLToPath(new URL('../scripts/ci-security.mjs',import.meta.url)))}});
+        for(const path of ['trivy','trivy-bin/trivy','monitor-trivy-bin/trivy'])await writeFile(join(run,path),executable);
+        const result=spawnSync(shell,['-e','-u','-o','pipefail','-c','chmod +x "$RUNNER_TEMP/trivy" "$RUNNER_TEMP/trivy-bin/trivy" "$RUNNER_TEMP/monitor-trivy-bin/trivy"\n'+controls+script],{cwd:run,encoding:'utf8',env:{...process.env,RUNNER_TEMP:posix(run),GITHUB_PATH:posix(join(run,'github-path')),FIXTURE_ARCHIVE:posix(join(run,'fixture.tar.gz')),CALLS_FILE:posix(join(run,'calls.txt')),EXPECTED_VERSION:identity.version,EXPECTED_SHA:scenario==='checksum'?'0'.repeat(64):digest,EXECUTED_VERSION:scenario==='version'?'99.0.0':identity.version,NODE_BIN:posix(process.execPath),SOURCE_CLI:posix(fileURLToPath(new URL('../scripts/ci-security.mjs',import.meta.url)))}});
         const calls=await readFile(join(run,'calls.txt'),'utf8');
         if(scenario==='valid'){assert.equal(result.status,0,result.stderr);assert(calls.includes('database'));assert(calls.indexOf('execute-version')<calls.indexOf('database'));}
         else{assert.notEqual(result.status,0);assert(!calls.includes('database'));if(scenario==='checksum')assert(!calls.includes('extract')&&!calls.includes('execute-version'));else assert(calls.includes('execute-version'));}
@@ -93,7 +106,7 @@ test('quality retains exact image/browser coverage with read-only fork-safe arti
   assert(!workflow.on.pull_request_target&&!workflow.on.workflow_run);
   assert(Object.hasOwn(workflow.on,'pull_request'));assert(Object.hasOwn(workflow.on,'push'));
   assert.equal(workflow.env.QUALITY_SOURCE,'${{ github.event.pull_request.head.sha || github.sha }}');
-  assert.deepEqual(Object.keys(workflow.jobs).sort(),['browser','quality-image']);
+  assert.deepEqual(Object.keys(workflow.jobs).sort(),['browser','published-image','quality-image']);
   const image=workflow.jobs['quality-image'],browser=workflow.jobs.browser;
   assert.equal(browser.needs,'quality-image');assert.deepEqual(browser.permissions,{contents:'read',actions:'read'});
   for(const job of [image,browser]) {

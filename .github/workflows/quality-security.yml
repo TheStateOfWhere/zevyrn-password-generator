@@ -6,17 +6,85 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '23 7 * * 1'
+    - cron: '41 6 * * *'
 
 permissions:
   contents: read
 env:
   QUALITY_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
 concurrency:
-  group: quality-${{ github.workflow }}-${{ github.ref }}
+  group: quality-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' && github.event.schedule == '41 6 * * *' && 'published-monitor' || 'source' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  published-image:
+    if: ${{ github.event_name == 'schedule' && github.event.schedule == '41 6 * * *' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TRIVY_DISABLE_TELEMETRY: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: Initialize isolated anonymous monitoring
+        id: init
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/published-monitor-docker"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '{}\n' > "$DOCKER_CONFIG/config.json"
+          printf 'DOCKER_CONFIG=%s\n' "$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          node scripts/release-integrity.mjs monitor-init "$RUNNER_TEMP/published-monitor"
+      - name: Authenticate and retrieve reviewed published digest
+        id: retrieval
+        run: node scripts/release-integrity.mjs monitor-retrieve "$RUNNER_TEMP/published-monitor"
+      - name: Verified monitoring scanner and fresh database
+        id: scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(node scripts/ci-security.mjs toolchain)"
+          read -r trivy_version trivy_sha256 <<< "$toolchain"
+          mkdir -p "$RUNNER_TEMP/monitor-trivy-bin"
+          curl --fail --location "https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/trivy_${trivy_version}_Linux-64bit.tar.gz" -o "$RUNNER_TEMP/monitor-trivy.tar.gz"
+          printf '%s  %s\n' "$trivy_sha256" "$RUNNER_TEMP/monitor-trivy.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/monitor-trivy.tar.gz" -C "$RUNNER_TEMP/monitor-trivy-bin" trivy
+          "$RUNNER_TEMP/monitor-trivy-bin/trivy" version --format json > "$RUNNER_TEMP/monitor-executable-version.json"
+          node scripts/ci-security.mjs scanner-version "$RUNNER_TEMP/monitor-executable-version.json"
+          "$RUNNER_TEMP/monitor-trivy-bin/trivy" image --cache-dir "$RUNNER_TEMP/monitor-trivy-cache" --download-db-only
+          "$RUNNER_TEMP/monitor-trivy-bin/trivy" --cache-dir "$RUNNER_TEMP/monitor-trivy-cache" version --format json > "$RUNNER_TEMP/monitor-scanner-version.json"
+          node scripts/release-integrity.mjs monitor-scanner "$RUNNER_TEMP/published-monitor" "$RUNNER_TEMP/monitor-scanner-version.json" "$RUNNER_TEMP/monitor-trivy-cache/db/trivy.db"
+      - name: Scan authenticated published runtime only
+        id: scan
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/monitor-trivy-cache
+        run: node scripts/release-integrity.mjs monitor-scan "$RUNNER_TEMP/published-monitor" "$RUNNER_TEMP/monitor-trivy-bin/trivy"
+      - name: Retain sanitized non-promotable monitoring outcome
+        if: always()
+        env:
+          MONITOR_STAGES: >-
+            {"init":"${{ steps.init.outcome }}","retrieval":"${{ steps.retrieval.outcome }}","scanner":"${{ steps.scanner.outcome }}","scan":"${{ steps.scan.outcome }}"}
+        run: node scripts/release-integrity.mjs monitor-finalize "$RUNNER_TEMP/published-monitor" artifacts/published-monitoring "$MONITOR_STAGES"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: published-monitoring-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/published-monitoring/monitoring.json
+            artifacts/published-monitoring/summary.md
+          retention-days: 7
+          if-no-files-found: warn
+
   quality-image:
+    if: ${{ (!github.event.schedule && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'schedule' && github.event.schedule == '23 7 * * 1' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
